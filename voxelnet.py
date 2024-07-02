@@ -160,14 +160,19 @@ class VoxelFeatureExtractionLayer(nn.Module):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self,n_feat_in, n_feat_out,):
+    def __init__(self,n_feat_in, n_feat_out,append_aggregate=True):
         super().__init__()
 
         self.name = "VFELayer"
         self.n_feat_in = n_feat_in
         self.n_feat_out = n_feat_out
+        self.append_aggregate = append_aggregate
 
-        n_hidden = int(n_feat_out/2)
+        if append_aggregate:
+            # tries to keep feature length constant
+            n_hidden = int(n_feat_out/2)
+        else:
+            n_hidden = n_feat_out
 
         self.linear = nn.Linear(n_feat_in, n_hidden, bias=True)
         self.seq = nn.Sequential(
@@ -184,7 +189,6 @@ class VoxelFeatureExtractionLayer(nn.Module):
         """compute the initial decorated point cloud, including offset towards
         vox center
         """
-
         out = self.linear(voxel_batch)
 
         # apply masking using broadcasting
@@ -192,11 +196,13 @@ class VoxelFeatureExtractionLayer(nn.Module):
 
         # apply the rest of the pipeline
         out = self.seq(out)
-        out:torch.Tensor = self.maxpool(out)
+        out_max:torch.Tensor = self.maxpool(out)
 
-        # concatenate over feature dimension
-        out,_ = pack([voxel_batch, out.expand_as(voxel_batch)],"b p *")
-
-        assert(out.shape[-1]==self.n_feat_out)
+        if self.append_aggregate:
+            # concatenate over feature dimension
+            out,_ = pack([out, out_max.expand_as(voxel_batch)],"b p *")
+            assert(out.shape[-1]==self.n_feat_out)
+            return out
+        else: # just return aggregated feature
+            return out_max
         
-        return out
