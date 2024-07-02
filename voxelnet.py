@@ -3,6 +3,7 @@ from typing import List
 import torch
 from torch import nn
 from einops import rearrange, pack, reduce
+from einops.layers.torch import Rearrange, Reduce
 
 class Voxelization(nn.Module):
     """implement a module for voxelizaing point cloud data
@@ -19,6 +20,8 @@ class Voxelization(nn.Module):
                  init_decoration=True
                  ):
         super().__init__()
+
+        self.name = "Voxelization"
 
         # if True, append diff to vox center
         self.init_decoration = init_decoration
@@ -152,15 +155,48 @@ class Voxelization(nn.Module):
         return voxel_batch, coord_batch, mask_batch, vox_center_batch
 
 class VoxelFeatureExtractionLayer(nn.Module):
-    def __init__(self,):
+    """Implements the VFE layer in VoxelNet
+
+    Args:
+        nn (_type_): _description_
+    """
+    def __init__(self,n_feat_in, n_feat_out,):
         super().__init__()
 
+        self.name = "VFELayer"
+        self.n_feat_in = n_feat_in
+        self.n_feat_out = n_feat_out
 
+        n_hidden = int(n_feat_out/2)
 
-    def forward(self, pc_batch, ):
+        self.linear = nn.Linear(n_feat_in, n_hidden, bias=True)
+        self.seq = nn.Sequential(
+            Rearrange("b p d->b d p"), # such that 2nd dim is feature, for BN1d
+            nn.BatchNorm1d(num_features=n_hidden, momentum=0.01),
+            Rearrange("b d p-> b p d"), # rearrange back
+            nn.ReLU()
+        )
+
+        # max over all points in a voxel
+        self.maxpool = Reduce("b p d -> b 1 d", "max")
+
+    def forward(self, voxel_batch, mask):
         """compute the initial decorated point cloud, including offset towards
         vox center
         """
 
-        pass
+        out = self.linear(voxel_batch)
 
+        # apply masking using broadcasting
+        out = out*rearrange(mask,"nvox npt -> nvox npt 1")
+
+        # apply the rest of the pipeline
+        out = self.seq(out)
+        out:torch.Tensor = self.maxpool(out)
+
+        # concatenate over feature dimension
+        out,_ = pack([voxel_batch, out.expand_as(voxel_batch)],"b p *")
+
+        assert(out.shape[-1]==self.n_feat_out)
+        
+        return out
