@@ -96,11 +96,8 @@ class Voxelization(nn.Module):
         # broadcasting
         mask = rearrange(torch.arange(self.max_voxel_pts),"d -> 1 d") < \
             rearrange(counts,"d->d 1")
-        mask.to(pc.dtype)
+        mask = mask.to(pc.dtype)
         
-        # add axis at feature dimension
-        mask_ = rearrange(mask,"nvox npt -> nvox npt 1")
-
         # calculate voxel center
         vox_center = unique_coord*self.vox_sz + (self.lb + self.vox_sz/2)
 
@@ -112,7 +109,7 @@ class Voxelization(nn.Module):
             # compute diff with vox center and append as feature
             pt_center = reduce(voxel[:,:,:3],"nvox npt d -> nvox 1 d","sum")/ \
             rearrange(counts, "nvox -> nvox 1 1")
-            diff = (voxel - pt_center)*mask_
+            diff = (voxel - pt_center)*rearrange(mask,"nvox npt -> nvox npt 1")
             voxel,_ = pack([voxel, diff],"nvox npt *")
 
         return voxel, unique_coord, mask, vox_center
@@ -139,7 +136,6 @@ class Voxelization(nn.Module):
         for ibatch, pc in enumerate(point_cloud):
             voxel, coord, mask, vox_center = \
                 self.process_single_batch_pc(pc, ibatch)
-            
             # append all output
             voxel_batch.append(voxel)
             coord_batch.append(coord)
@@ -147,10 +143,10 @@ class Voxelization(nn.Module):
             vox_center_batch.append(vox_center)
 
         # concatenate along the batch dimension
-        voxel_batch,_ = pack(voxel_batch,"* np m")
-        coord_batch,_ = pack(coord_batch,"* np n")
-        mask_batch,_ = pack(mask_batch, "* np k")
-        vox_center_batch,_ = pack(vox_center_batch, "* np i")
+        voxel_batch = torch.concatenate(voxel_batch,dim=0)
+        coord_batch = torch.concatenate(coord_batch,dim=0)
+        mask_batch = torch.concatenate(mask_batch, dim=0)
+        vox_center_batch = torch.concatenate(vox_center_batch, dim=0)
 
         return voxel_batch, coord_batch, mask_batch, vox_center_batch
 
@@ -198,11 +194,14 @@ class VoxelFeatureExtractionLayer(nn.Module):
         out = self.seq(out)
         out_max:torch.Tensor = self.maxpool(out)
 
+        # print(out.shape, out_max.shape)
+
         if self.append_aggregate:
             # concatenate over feature dimension
-            out,_ = pack([out, out_max.expand_as(voxel_batch)],"b p *")
+            out,_ = pack([out, out_max.expand_as(out)],"b p *")
             assert(out.shape[-1]==self.n_feat_out)
             return out
         else: # just return aggregated feature
+            out_max = rearrange(out_max, "b 1 d->b d") # squeeze
             return out_max
         
