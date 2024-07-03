@@ -14,12 +14,12 @@ class GeneralizedMHDPAttentionModule(nn.Module):
     """
     def __init__(self,
                  n_head,
-                 Df1,
-                 Dfout,
-                 Dqk,
-                 Dv,
+                 n_feat_1,
+                 n_feat_out,
+                 n_qk,
+                 n_v,
                  *args,
-                 Df2=None,
+                 n_feat_2=None,
                  bias=False,
                  softmax_axis="k",
                  epsilon=1e-8,
@@ -35,49 +35,51 @@ class GeneralizedMHDPAttentionModule(nn.Module):
         """
         super().__init__()
         self.n_head = n_head
-        self.Df1 = Df1
-        self.Dfout = Dfout
-        self.Dqk = Dqk
-        self.Dv = Dv
-        self.Df2 = Df2
+        self.n_feat_1 = n_feat_1
+        self.n_feat_out = n_feat_out
+        self.n_qk = n_qk
+        self.n_v = n_v
+        self.n_feat_2 = n_feat_2
         self.bias = bias
-        self.sf = 1./np.sqrt(Dqk)
+        self.sf = 1./np.sqrt(n_qk)
         self.softmax_axis = softmax_axis
         self.epsilon = epsilon
 
-        self.w_qf = nn.Linear(self.Df1,self.n_head*self.Dqk,bias=self.bias)
+        self.w_qf = nn.Linear(self.n_feat_1,self.n_head*self.n_qk,bias=self.bias)
 
-        self.cross_attn = self.Df2 is not None
+        self.cross_attn = self.n_feat_2 is not None
 
-        # do cross attention if Df2 is not none; else do self attention
-        self.Df2 = self.Df1 if self.Df2 is None else self.Df2
-        self.w_kf = nn.Linear(self.Df2,self.n_head*self.Dqk,bias=self.bias)
-        self.w_vf = nn.Linear(self.Df2,self.n_head*self.Dv,bias=self.bias)
+        # do cross attention if n_feat_2 is not none; else do self attention
+        self.n_feat_2 = \
+            self.n_feat_1 if self.n_feat_2 is None else self.n_feat_2
+        self.w_kf = nn.Linear(self.n_feat_2,self.n_head*self.n_qk,
+                              bias=self.bias)
+        self.w_vf = nn.Linear(self.n_feat_2,self.n_head*self.n_v,
+                              bias=self.bias)
         
         # the fully connected layer combining all heads
-        self.fc_all_heads = nn.Linear(self.n_head*self.Dv,self.Dfout,
+        self.fc_all_heads = nn.Linear(self.n_head*self.n_v,self.n_feat_out,
                                       bias=self.bias)
         
-
     def forward(self, feature1, feature2=None, mask=None):
 
-        # feature1 = rearrange(feature1,"b n Df1 -> b n Df1")
+        # feature1 = rearrange(feature1,"b n n_feat_1 -> b n n_feat_1")
 
         if self.cross_attn:
             assert feature2 is not None,\
                  "Feature 2 required for cross attention!"
 
-        q = rearrange(self.w_qf(feature1),"b n (h Dqk) -> h b n Dqk",
+        q = rearrange(self.w_qf(feature1),"b n (h n_qk) -> h b n n_qk",
                       h=self.n_head)
         if feature2 is None:
             feature2 = feature1
-        k = rearrange(self.w_kf(feature2),"b m (h Dqk) -> h b m Dqk",
+        k = rearrange(self.w_kf(feature2),"b m (h n_qk) -> h b m n_qk",
                       h=self.n_head)
-        v = rearrange(self.w_vf(feature2),"b m (h Dv) -> h b m Dv",
+        v = rearrange(self.w_vf(feature2),"b m (h n_v) -> h b m n_v",
                       h=self.n_head)
         
         # compute dot product
-        dot_prod = einsum(q,k,"h b n Dq, h b m Dv -> h b n m")*self.sf
+        dot_prod = einsum(q,k,"h b n Dq, h b m n_v -> h b n m")*self.sf
 
         # deal with masking potentially here
         if mask is not None:
@@ -95,8 +97,8 @@ class GeneralizedMHDPAttentionModule(nn.Module):
             attn = torch.softmax(dot_prod,axis=-1)
 
         # times value
-        output = einsum(attn, v, "h b n m, h b m Dv -> h b n Dv")
-        output = rearrange(output, "h b n Dv -> b n (h Dv)")
+        output = einsum(attn, v, "h b n m, h b m n_v -> h b n n_v")
+        output = rearrange(output, "h b n n_v -> b n (h n_v)")
 
         updates = self.fc_all_heads(output)
         attn = rearrange(attn, "h b n m -> b h n m")
@@ -105,10 +107,10 @@ class GeneralizedMHDPAttentionModule(nn.Module):
 
 class SlotAttentionMLP(nn.Module):
     def __init__(self,
-                 d_feature_in,
-                 d_hidden,
-                 d_feature_out,
+                 n_feat_in,
                  n_hidden,
+                 n_feat_out,
+                 n_layers,
                  pre_post_ln,
                  actv_fn="relu",
                  add_residual=True):
@@ -119,28 +121,28 @@ class SlotAttentionMLP(nn.Module):
 
         # pre layer norm
         if pre_post_ln == "pre":
-            layers.append(nn.LayerNorm(normalized_shape=d_feature_in))
+            layers.append(nn.LayerNorm(normalized_shape=n_feat_in))
 
         # fc layers
-        d_in = d_feature_in
-        d_out = d_hidden
-        for _ in range(n_hidden):
-            layers.append(nn.Linear(d_in,d_out))
-            d_in = d_out
-            d_out = d_hidden
+        n_in = n_feat_in
+        n_out = n_hidden
+        for _ in range(n_layers):
+            layers.append(nn.Linear(n_in,n_out))
+            n_in = n_out
+            n_out = n_hidden
             if actv_fn=="relu":
                 layers.append(nn.ReLU())
         
-        layers.append(nn.Linear(d_in, d_feature_out))
+        layers.append(nn.Linear(n_in, n_feat_out))
 
         # post layer norm
         if pre_post_ln == "post":
-            layers.append(nn.LayerNorm(normalized_shape=d_feature_out))
+            layers.append(nn.LayerNorm(normalized_shape=n_feat_out))
 
-        self.mdl = nn.Sequential(*layers)
+        self.mlp = nn.Sequential(*layers)
 
     def forward(self, input):
-        x = self.mdl(input)
+        x = self.mlp(input)
 
         if self.add_residual:
             x = x + input
@@ -155,7 +157,7 @@ class SlotAttentionModule(nn.Module):
     """
     def __init__(self,
                  n_slot,
-                 d_slot_feature,
+                 n_slot_feat,
                  n_iter,
                  attn_module_config:dict) -> None:
         """_summary_
@@ -170,14 +172,14 @@ class SlotAttentionModule(nn.Module):
 
         self.n_iter = n_iter
 
-        self.ln = nn.LayerNorm(normalized_shape=d_slot_feature)
+        self.ln = nn.LayerNorm(normalized_shape=n_slot_feat)
         self.attn = GeneralizedMHDPAttentionModule(**attn_module_config)
 
-        self.gru = nn.GRUCell(input_size=d_slot_feature,
-                              hidden_size=d_slot_feature)
+        self.gru = nn.GRUCell(input_size=n_slot_feat,
+                              hidden_size=n_slot_feat)
         
-        self.mlp = SlotAttentionMLP(d_feature_in=d_slot_feature,d_hidden=512,
-                                    d_feature_out=d_slot_feature,n_hidden=2,
+        self.mlp = SlotAttentionMLP(n_feat_in=n_slot_feat,n_hidden=512,
+                                    n_feat_out=n_slot_feat,n_layers=2,
                                     pre_post_ln="pre",add_residual=True)
     
     def forward(self, slots, other_features=None):
