@@ -28,9 +28,12 @@ class Voxelization(nn.Module):
 
         dx,dy,dz = voxel_size
 
-        nx = int((x_max-x_min)//dx)
-        ny = int((y_max-y_min)//dy)
-        nz = int((z_max-z_min)//dz)
+        nx = int(np.round((x_max-x_min)/dx))
+        ny = int(np.round((y_max-y_min)/dy))
+        nz = int(np.round((z_max-z_min)/dz))
+
+        self.spatial_shape_WHD = [nx,ny,nz]
+        self.spatial_shape_DHW = self.spatial_shape_WHD[::-1]
 
         # make the range integer copy of the interval
         x_max = x_min + nx*dx
@@ -40,12 +43,12 @@ class Voxelization(nn.Module):
         self.x_range = [x_min, x_max]
         self.y_range = [y_min, y_max]
         self.z_range = [z_min, z_max]
-        self.voxel_size = voxel_size
+        self.voxel_size_DHW = voxel_size[::-1] # dx,dy,dz
         self.max_voxel_pts = max_voxel_pts
 
         # expand axis
-        self.lb = rearrange(torch.tensor([x_min,y_min,z_min]),"d->1 d")
-        self.vox_sz = rearrange(torch.tensor(self.voxel_size),"d->1 d")
+        self.lb_DHW = rearrange(torch.tensor([ z_min,y_min,x_min]),"d->1 d")
+        self.vox_sz_DHW = rearrange(torch.tensor(self.voxel_size_DHW),"d->1 d")
 
     def process_single_batch_pc(self, pc:torch.Tensor, ibatch):
         # exclude out of range points
@@ -61,7 +64,9 @@ class Voxelization(nn.Module):
         keep = torch.argwhere(keep).squeeze()
 
         pc = pc[keep,:]
-        coord = ((pc[:,:3] - self.lb)/self.vox_sz).to(torch.int64)
+        # rearrange to DHW
+        pc[:,:3] = pc[:,[2,1,0]]
+        coord = ((pc[:,:3] - self.lb_DHW)/self.vox_sz_DHW).to(torch.int32)
         coord : torch.Tensor
 
         unique_coord, inverse_ind, counts = coord.unique(
@@ -99,11 +104,13 @@ class Voxelization(nn.Module):
         mask = mask.to(pc.dtype)
         
         # calculate voxel center
-        vox_center = unique_coord*self.vox_sz + (self.lb + self.vox_sz/2)
+        vox_center = unique_coord*self.vox_sz_DHW + \
+            (self.lb_DHW+self.vox_sz_DHW/2)
 
         # add batch number; after shape: nv by 4, i.e. (ibatch, ix, iy, iz)
         unique_coord = nn.functional.pad(unique_coord,(1,0),mode="constant",
                                          value=ibatch)
+        # unique_coord.to(torch.int32)
         
         if self.init_decoration:
             # compute diff with vox center and append as feature
@@ -187,11 +194,16 @@ class VoxelFeatureExtractionLayer(nn.Module):
         """
         out = self.linear(voxel_batch)
 
-        # apply masking using broadcasting
-        out = out*rearrange(mask,"nvox npt -> nvox npt 1")
+        # apply masking using broadcasting, necessary if allow bias in previous
+        # linear layer
+        mask_ = rearrange(mask,"nvox npt -> nvox npt 1")
+        out = out*mask_
 
         # apply the rest of the pipeline
         out = self.seq(out)
+
+        # before doing the max pool, set the masked out points to -inf
+        out = out + (1.0-mask_)*(-1.0e9)
         out_max:torch.Tensor = self.maxpool(out)
 
         # print(out.shape, out_max.shape)
@@ -204,4 +216,35 @@ class VoxelFeatureExtractionLayer(nn.Module):
         else: # just return aggregated feature
             out_max = rearrange(out_max, "b 1 d->b d") # squeeze
             return out_max
+
+class VoxelFeatureExtraction(nn.Module):
+
+    def __init__(self,
+                 n_feat_in,
+                 n_hidden_per_layer,
+                 n_feat_out):
+        super().__init__()
+
+        self.n_feat_in = n_feat_in
+        self.n_hidden_per_layer = n_hidden_per_layer
+        self.n_feat_out = n_feat_out
+
+        n_hidden_layer = len(n_hidden_per_layer)
+
+        self.layers = []
+        n_in = n_feat_in
+        for i in range(n_hidden_layer):
+            n_out = n_hidden_per_layer[i]
+            self.layers.append(VoxelFeatureExtractionLayer(n_in,n_out,
+                                                      append_aggregate=True))
+            n_in = n_out
         
+        # last layer, without appending aggregate
+        self.layers.append(VoxelFeatureExtractionLayer(n_in,n_feat_out,
+                                                  append_aggregate=False))
+        
+    def forward(self, voxel_batch, mask):
+        x = voxel_batch
+        for vfe in self.layers:
+            x = vfe(x, mask)
+        return x
