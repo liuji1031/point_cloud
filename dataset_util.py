@@ -445,18 +445,18 @@ class NusceneDataset(data.Dataset):
         neg_anchor_id = neg_anchor_id.flatten()
 
         # create regression target
-        ind_x, ind_y, ind_a = np.unravel_index(pos_anchor_id,
+        ind_x_p, ind_y_p, ind_a_p = np.unravel_index(pos_anchor_id,
                                 (self.canvas_h,self.canvas_w,self.n_anchor))
         
         # compute the difference
-        pos_anchor_center_x = self.anchor_center_xy[ind_x,ind_y,ind_a,0]
-        pos_anchor_center_y = self.anchor_center_xy[ind_x,ind_y,ind_a,1]
-        pos_anchor_center_z = self.anchor_z[ind_a]
-        pos_anchor_diag = self.anchor_d[ind_a]
-        pos_anchor_l = self.anchor_l[ind_a]
-        pos_anchor_w = self.anchor_w[ind_a]
-        pos_anchor_h = self.anchor_h[ind_a]
-        pos_anchor_yaw = self.anchor_yaw[ind_a]
+        pos_anchor_center_x = self.anchor_center_xy[ind_x_p,ind_y_p,ind_a_p,0]
+        pos_anchor_center_y = self.anchor_center_xy[ind_x_p,ind_y_p,ind_a_p,1]
+        pos_anchor_center_z = self.anchor_z[ind_a_p]
+        pos_anchor_diag = self.anchor_d[ind_a_p]
+        pos_anchor_l = self.anchor_l[ind_a_p]
+        pos_anchor_w = self.anchor_w[ind_a_p]
+        pos_anchor_h = self.anchor_h[ind_a_p]
+        pos_anchor_yaw = self.anchor_yaw[ind_a_p]
 
         pos_gt_center_x, pos_gt_center_y = gt_x[pos_gt_id], gt_y[pos_gt_id]
         pos_gt_center_z = gt_z[pos_gt_id]
@@ -481,9 +481,23 @@ class NusceneDataset(data.Dataset):
         dh = dh[:, np.newaxis]
         dyaw = dyaw[:, np.newaxis]
 
-        reg_target = np.hstack([dx, dy, dz, dl, dw, dh, dyaw])
+        # reg_target = np.hstack([dx, dy, dz, dl, dw, dh, dyaw])
+        reg_target = np.zeros((self.canvas_h,self.canvas_w,self.n_anchor,7))
+        reg_target[ind_x_p,ind_y_p,ind_a_p,:] = np.hstack([dx,dy,dz,dl,dw,dh,dyaw])
+        reg_target = rearrange(reg_target,"h w na d -> h w (na d)",d=7)
 
-        return pos_anchor_id, neg_anchor_id, reg_target
+        # convert indices to mask
+        pos_anchor_id_mask = np.zeros(
+            (self.canvas_h,self.canvas_w,self.n_anchor))
+        pos_anchor_id_mask[ind_x_p,ind_y_p,ind_a_p] = 1.0
+
+        neg_anchor_id_mask = np.zeros(
+            (self.canvas_h,self.canvas_w,self.n_anchor))
+        ind_x_n, ind_y_n, ind_a_n = np.unravel_index(neg_anchor_id,
+                                (self.canvas_h,self.canvas_w,self.n_anchor))
+        neg_anchor_id_mask[ind_x_n,ind_y_n,ind_a_n] = 1.0
+
+        return pos_anchor_id_mask, neg_anchor_id_mask, reg_target
 
     def cal_target(self, ):
         pass
