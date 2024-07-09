@@ -10,33 +10,43 @@ class RPN(nn.Module):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(self,*args,nanchor=2, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self.name = "RPN"
 
-        def conv_block(n_in, n_out, kernel_size, stride, padding, repeat=1):
+        def conv_block(n_in, n_out, kernel_size, stride, padding, repeat=1,
+                       add_bn=True, add_relu=True):
             layers = []
             for _ in range(repeat):
-                layers+=[
-                nn.Conv2d(n_in, n_out, kernel_size=kernel_size,
-                          stride=stride, padding=padding),
-                nn.BatchNorm2d(n_out),
-                nn.ReLU()
-                ]
+                layers.append(nn.Conv2d(n_in, n_out, kernel_size=kernel_size,
+                          stride=stride, padding=padding))
+                
+                if add_bn:
+                    layers.append(nn.BatchNorm2d(n_out))
+                
+                if add_relu:
+                    layers.append(nn.ReLU())
+                
             return layers
         
-        def deconv_block(n_in, n_out, kernel_size, stride, padding, repeat=1):
+        def deconv_block(n_in, n_out, kernel_size, stride, padding, repeat=1,
+                         add_bn=True, add_relu=True):
             layers = []
             for _ in range(repeat):
-                layers+=[
-                nn.ConvTranspose2d(n_in, n_out, kernel_size=kernel_size,
-                          stride=stride, padding=padding),
-                nn.BatchNorm2d(n_out),
-                nn.ReLU()
-                ]
+                
+                layers.append(nn.ConvTranspose2d(n_in, n_out, kernel_size=kernel_size,
+                          stride=stride, padding=padding))
+
+                if add_bn:
+                    layers.append(nn.BatchNorm2d(n_out))
+
+                if add_relu:
+                    layers.append(nn.ReLU())
+
             return layers
 
+        self.nanchor = nanchor
         self.block1 = nn.Sequential(*conv_block(128, 128, 3, 2, 1,repeat=1),
                                     *conv_block(128, 128, 3, 1, 1,repeat=3)
                                 )
@@ -53,8 +63,13 @@ class RPN(nn.Module):
         self.deconv2 = nn.Sequential(*deconv_block(128, 256, 2, 2, 0,repeat=1))
         self.deconv3 = nn.Sequential(*deconv_block(256, 256, 4, 4, 0,repeat=1))
 
-        self.head1 = nn.Sequential(*conv_block(768, 2, 1, 1, 0,repeat=1))
-        self.head2 = nn.Sequential(*conv_block(768, 14, 1, 1, 0,repeat=1))
+        self.head1 = nn.Sequential(*conv_block(768, 2, 1, 1, 0,repeat=1,
+                                               add_bn=False,
+                                               add_relu=False))
+        self.head2 = nn.Sequential(*conv_block(768, 7*nanchor, 1, 1, 0,
+                                               repeat=1,
+                                               add_bn=False,
+                                               add_relu=False))
 
     def forward(self, x):
 
@@ -75,7 +90,12 @@ class RPN(nn.Module):
         x,_ = pack([x1_,x2_,x3_],"b * h w")
 
         cls = self.head1(x)
+        # apply sigmoid on cls
+        cls = torch.sigmoid(cls)
+
         reg = self.head2(x)
+        # for every pos anchor, we have 7 values, which are: dx dy dz dl dw dh 
+        # dyaw. These can be positive or negative, thus no relu
 
         return cls, reg
         
