@@ -13,7 +13,7 @@ from easydict import EasyDict as edict
 from nuscenes.nuscenes import NuScenes
 from nuscenes.utils.data_classes import LidarPointCloud, Box
 from nuscenes.utils.geometry_utils import transform_matrix
-from box_overlaps import bbox_overlaps
+from iou import iou_box_array
 
 def get_lidar_pts(nusc,sample):
     """retrieves raw lidar points from filename stored in sample data
@@ -77,6 +77,45 @@ def inv_transform(T):
     T_inv[:3,[3]] = -multi_dot([R.T,t])
     return T_inv
 
+def get_lidar_pts_singlesweep(nusc, sample, sensor="LIDAR_TOP",
+                              convert_to_ego_frame=True,
+                              min_dist=1.0):
+    """returns the lidar points for a single sweep
+
+    Args:
+        nusc (_type_): _description_
+        sample (_type_): _description_
+        sensor (str, optional): _description_. Defaults to "LIDAR_TOP".
+        convert_to_ego_frame (bool, optional): _description_. Defaults to True.
+
+    Returns:
+        _type_: _description_
+    """
+
+    sample_data = get_sensor_data(nusc,sample,sensor)
+
+    pc = get_lidar_pts(nusc,sample)
+    pc.remove_close(min_dist)
+
+    if not convert_to_ego_frame:
+        return pc.points.T
+
+    # get ego pose and transformation
+    ego_pose = get_ego_pose(nusc,sample,sensor)
+    car_ref_global = transform_matrix_from_pose(ego_pose,inverse=False)
+
+    # get sensor ref car transformation
+    sensor_ref_car = transform_matrix_from_pose(
+                        nusc.get("calibrated_sensor",
+                                sample_data["calibrated_sensor_token"]),
+                        inverse=False
+                    )
+    
+    # convert sensor points to car body frame
+    pc.transform(sensor_ref_car)
+
+    return pc.points.T
+
 def get_lidar_pts_multisweep(scene,
                               nusc : "NuScene",
                               sensor="LIDAR_TOP",
@@ -122,6 +161,7 @@ def get_lidar_pts_multisweep(scene,
         pc.remove_close(min_dist)
         # convert sensor points to car body frame
         pc.transform(sensor_ref_car)
+
         # plt.hist(pc.points[2,:],50)
         # plt.show()
         if car_ref_global_prev is None:
@@ -149,7 +189,8 @@ def get_lidar_pts_multisweep(scene,
                 data = deepcopy(pc_.points.T)
                 dist = np.linalg.norm(data[:,:2],axis=-1,keepdims=False)
                 ind = np.argsort(dist)
-                data = data[ind[:nkeep],:]
+                if nkeep != "all":
+                    data = data[ind[:nkeep],:]
                 data = data/norm_factor
                 tmp.append(data)
             data_out.append(tmp)
@@ -167,6 +208,15 @@ def plot_lidar_multisweep(lidar_pts):
         plt.scatter(pc[:,0],pc[:,1],0.5)
 
     plt.gca().set_aspect("equal")
+
+def plot_lidar(lidar_pts,show=True):
+    plt.figure(figsize=(12,12),dpi=300)
+    if not isinstance(lidar_pts, np.ndarray):
+        lidar_pts = lidar_pts.points.T
+    plt.scatter(lidar_pts[:,0],lidar_pts[:,1],0.02)
+    plt.gca().set_aspect("equal")
+    if show:
+        plt.show()
 
 def next_sample(nusc,sample,skip=1):
     """return the sample by skipping "skip" number of samples
@@ -195,7 +245,8 @@ def parameterize_gt_boxes(box : Box):
     return [x,y,z,l,w,h,yaw]
 
 def get_gt_boxes(nusc : NuScenes, sample, target_class="vehicle", render=False):
-    _, boxes, _ = nusc.get_sample_data(sample['data']['LIDAR_TOP'])
+    _, boxes, _ = nusc.get_sample_data(sample['data']['LIDAR_TOP'],
+                                       use_flat_vehicle_coordinates=True)
     
     annotations = sample["anns"]
     assert(len(annotations) == len(boxes))
@@ -215,7 +266,7 @@ def get_gt_boxes(nusc : NuScenes, sample, target_class="vehicle", render=False):
                 plt.show()
                 print(gt_boxes[-1])
 
-    return np.array(gt_boxes)
+    return np.array(gt_boxes), boxes
 
 # def gt_boxes_to_array(gt_boxes):
 #     """save gt_boxes to numpy array; each key mapped to a single numpy array
@@ -264,8 +315,8 @@ def get_2d_corners(x,y,l,w,yaw):
     yg = yg.reshape((1,-1)) # row vector
 
     # in nuscene w:l is roughly 2:1
-    x_ = rearrange(w/2*xg,"n d -> n 1 d", d=4) # w is associated with x
-    y_ = rearrange(l/2*yg,"n d -> n 1 d", d=4) # l is associated with y
+    x_ = rearrange(l/2*xg,"n d -> n 1 d", d=4) # w is associated with x
+    y_ = rearrange(w/2*yg,"n d -> n 1 d", d=4) # l is associated with y
     xy,_ = pack([x_,y_],"n * d") # n x 2 x 4
     
     # batch matrix multiplication
@@ -298,7 +349,7 @@ class NusceneDataset(data.Dataset):
                  canvas_h,
                  canvas_w,
                  canvas_res_hw,
-                 canvas_offset_hw,
+                 canvas_min_hw,
                  anchors,
                  target_class="vehicle",
                  pos_neg_iou_thresh=[0.6,0.45],
@@ -310,7 +361,7 @@ class NusceneDataset(data.Dataset):
         self.canvas_h = canvas_h # lateral axis, eg 400 (as in voxelnet paper)
         self.canvas_w = canvas_w # anterior-posterior axis, eg 352 
         self.canvas_res_hw = canvas_res_hw # resolution of the canvas
-        self.canvas_offset_hw = canvas_offset_hw # offset of the canvas
+        self.canvas_min_hw = canvas_min_hw # offset of the canvas
         self.anchors = anchors # list of 3d anchor boxes, specified as l,w,h,yaw
         self.target_class = target_class
         self.pos_neg_iou_thresh = pos_neg_iou_thresh
@@ -332,30 +383,36 @@ class NusceneDataset(data.Dataset):
         for a in self.anchors:
             a["diag"] = np.sqrt(a["l"]**2 + a["w"]**2)
 
-        self.anchor_z = np.array([a["z"] for a in self.anchors])
-        self.anchor_l = np.array([a["l"] for a in self.anchors])
-        self.anchor_w = np.array([a["w"] for a in self.anchors])
-        self.anchor_d = np.array([a["diag"] for a in self.anchors])
-        self.anchor_h = np.array([a["h"] for a in self.anchors])
-        self.anchor_yaw = np.array([a["yaw"] for a in self.anchors])
+        self.anchor_z = np.array([a["z"] for a in self.anchors])[:,np.newaxis]
+        self.anchor_l = np.array([a["l"] for a in self.anchors])[:,np.newaxis]
+        self.anchor_w = np.array([a["w"] for a in self.anchors])[:,np.newaxis]
+        self.anchor_d = np.array([a["diag"] for a in self.anchors])[:,np.newaxis]
+        self.anchor_h = np.array([a["h"] for a in self.anchors])[:,np.newaxis]
+        self.anchor_yaw = np.array([a["yaw"] for a in self.anchors])[:,np.newaxis]
 
         # create bounding boxes at each of the canvas locations
-        self.anchor_box_2corners, self.anchor_center_xy = \
+        self.anchor_box, self.anchor_box_2corners, self.anchor_center_xy = \
             self.create_2d_bbox_on_canvas()
 
     def create_2d_bbox_on_canvas(self,):
-        h = self.canvas_res_hw[0]/2*np.arange(self.canvas_h)+\
-            self.canvas_offset_hw[0]
-        w = self.canvas_res_hw[1]/2*np.arange(self.canvas_w)+\
-            self.canvas_offset_hw[1]
+        h = self.canvas_res_hw[0]*np.arange(self.canvas_h)+\
+            self.canvas_min_hw[0]+self.canvas_res_hw[0]/2
+        w = self.canvas_res_hw[1]*np.arange(self.canvas_w)+\
+            self.canvas_min_hw[1]+self.canvas_res_hw[1]/2
+        
+        print(h,w)
 
-        hg, wg = np.meshgrid(h,w) # h x w
+        hg, wg = np.meshgrid(h,w, indexing="ij") # h x w
+        print(hg.shape)
+        print(hg)
         hg = rearrange(hg,"h w -> (h w) 1")
         wg = rearrange(wg,"h w -> (h w) 1")
-        canvas_grid = rearrange(np.hstack([hg,wg]),"m n -> m 1 n") # m by 1 by 2
-
+        canvas_grid = np.hstack([hg,wg]) # m by 2
+        print(canvas_grid)
         # by m by n_anchor by 2
-        anchor_center = repeat(canvas_grid,"m 1 n -> m na n",na=self.n_anchor)
+        anchor_center = repeat(canvas_grid,"m n -> m na n",na=self.n_anchor)
+        print(anchor_center.shape)
+        print(anchor_center)
 
         # create box offsets
         L = np.array([a["l"] for a in self.anchors])[:,np.newaxis]# nanchor by 1
@@ -372,6 +429,10 @@ class NusceneDataset(data.Dataset):
         x_ = rearrange(L/2*xg,"na d -> na 1 d", d=4)
         y_ = rearrange(W/2*yg,"na d -> na 1 d", d=4)
         xy,_ = pack([x_,y_],"na * d") # nanchor x 2 x 4
+
+        print(xy.shape)
+        print(xy)
+
         xy = einsum(rot_mat, xy, "na a b, na b c -> na a c")# nx2x4
 
         # broadcast addition
@@ -389,19 +450,25 @@ class NusceneDataset(data.Dataset):
         
         anchor_center = rearrange(anchor_center, "(h w) na n -> h w na n",
                                   h=self.canvas_h)
-        return anchor_box_2corners, anchor_center
+        anchor_box = rearrange(anchor_box, "(h w) na n d -> h w na n d",
+                                h=self.canvas_h)
+        return anchor_box, anchor_box_2corners, anchor_center
             
-
     def __len__(self):
         return self.n_samples
     
-    def __getitem__(self, ind):
+    def compute_target(self, gt_boxes):
+        """_summary_
 
-        sample_token = self.sample_tokens[ind]
+        Args:
+            gt_boxes (_type_): 2D array contains the ground truth boxes. The
+            columns contains x, y, z, l, h, w, yaw respectively. Each row is one
+            box
 
-        # get 3D bounding box
-        gt_boxes = get_gt_boxes(self.nusc,self.nusc.get("sample",sample_token),
-                                self.target_class)
+        Returns:
+            _type_: _description_
+        """
+        
         n_gt_box = gt_boxes.shape[0]
         gt_x,gt_y,gt_z,gt_l,gt_w,gt_h,gt_yaw = \
             [gt_boxes[:,[_]] for _ in range(gt_boxes.shape[1])]
@@ -411,16 +478,25 @@ class NusceneDataset(data.Dataset):
         # get 2d corners, upper left and lower right bounding box
         gt_2d_2corners = get_2d_upper_lower_corners(gt_2d_4corners) # n by 2
 
+        print(gt_2d_2corners)
+
         # calculate upper and lower corner for the anchors
-        iou = bbox_overlaps(
-            self.anchor_box_2corners,
-            gt_2d_2corners,
+        n_anchor_box = self.anchor_box_2corners.shape[0]
+        iou = np.zeros((n_anchor_box,n_gt_box))
+        iou_box_array(iou,
+            self.anchor_box_2corners.astype(np.float32),
+            gt_2d_2corners.astype(np.float32),
         ) # nanchor by ngtbox
+
+        print(iou.shape)
+        print(iou)
 
         # for each ground truth box, find the highest iou anchor
         highest_iou_anchor_id = np.argmax(iou,axis=0)
-        highest_gt_id = np.arange(gt_boxes.shape[0])
-        mask = iou[highest_iou_anchor_id,highest_gt_id] > 0.0 # keep positive iou
+        highest_gt_id = np.arange(n_gt_box)
+
+        # keep positive iou
+        mask = iou[highest_iou_anchor_id,highest_gt_id] > 0.0
         highest_iou_anchor_id = highest_iou_anchor_id[mask]
         highest_gt_id = highest_gt_id[mask]
 
@@ -449,8 +525,10 @@ class NusceneDataset(data.Dataset):
                                 (self.canvas_h,self.canvas_w,self.n_anchor))
         
         # compute the difference
-        pos_anchor_center_x = self.anchor_center_xy[ind_x_p,ind_y_p,ind_a_p,0]
-        pos_anchor_center_y = self.anchor_center_xy[ind_x_p,ind_y_p,ind_a_p,1]
+        pos_anchor_center_x = \
+            self.anchor_center_xy[ind_x_p,ind_y_p,ind_a_p,0].reshape((-1,1))
+        pos_anchor_center_y = \
+            self.anchor_center_xy[ind_x_p,ind_y_p,ind_a_p,1].reshape((-1,1))
         pos_anchor_center_z = self.anchor_z[ind_a_p]
         pos_anchor_diag = self.anchor_d[ind_a_p]
         pos_anchor_l = self.anchor_l[ind_a_p]
@@ -464,6 +542,7 @@ class NusceneDataset(data.Dataset):
             gt_h[pos_gt_id]
         pos_gt_yaw = gt_yaw[pos_gt_id]
         
+        # all delta variables are column vectors
         dx = (pos_gt_center_x - pos_anchor_center_x)/pos_anchor_diag
         dy = (pos_gt_center_y - pos_anchor_center_y)/pos_anchor_diag
         dz = (pos_gt_center_z - pos_anchor_center_z)/pos_anchor_h
@@ -472,18 +551,10 @@ class NusceneDataset(data.Dataset):
         dh = np.log(pos_gt_h/pos_anchor_h)
         dyaw = pos_gt_yaw - pos_anchor_yaw
 
-        # convert variables to column vectors
-        dx = dx[:, np.newaxis]
-        dy = dy[:, np.newaxis]
-        dz = dz[:, np.newaxis]
-        dl = dl[:, np.newaxis]
-        dw = dw[:, np.newaxis]
-        dh = dh[:, np.newaxis]
-        dyaw = dyaw[:, np.newaxis]
-
         # reg_target = np.hstack([dx, dy, dz, dl, dw, dh, dyaw])
         reg_target = np.zeros((self.canvas_h,self.canvas_w,self.n_anchor,7))
-        reg_target[ind_x_p,ind_y_p,ind_a_p,:] = np.hstack([dx,dy,dz,dl,dw,dh,dyaw])
+        reg_target[ind_x_p,ind_y_p,ind_a_p] = \
+            np.hstack([dx,dy,dz,dl,dw,dh,dyaw])
         reg_target = rearrange(reg_target,"h w na d -> h w (na d)",d=7)
 
         # convert indices to mask
@@ -498,6 +569,27 @@ class NusceneDataset(data.Dataset):
         neg_anchor_id_mask[ind_x_n,ind_y_n,ind_a_n] = 1.0
 
         return pos_anchor_id_mask, neg_anchor_id_mask, reg_target
+    
+    def get_lidar_pts(self, ind):
+        sample_token = self.sample_tokens[ind]
+        sample = self.nusc.get("sample",sample_token)
 
-    def cal_target(self, ):
-        pass
+        lidar_pts = get_lidar_pts_singlesweep(self.nusc,sample,
+                                              convert_to_ego_frame=True,
+                                              min_dist=1.0)
+        return lidar_pts
+    
+    def __getitem__(self, ind):
+
+        sample_token = self.sample_tokens[ind]
+        # get 3D bounding box
+        gt_boxes,_ = get_gt_boxes(self.nusc,
+                                  self.nusc.get("sample",sample_token),
+                                self.target_class)
+        pos_anchor_id_mask, neg_anchor_id_mask, reg_target = \
+            self.compute_target(gt_boxes)
+        
+        # get the lidar points
+        lidar_pts = self.get_lidar_pts(ind)
+
+        return lidar_pts, pos_anchor_id_mask, neg_anchor_id_mask, reg_target
