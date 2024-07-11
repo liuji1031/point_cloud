@@ -365,7 +365,10 @@ class NusceneDataset(data.Dataset):
                  max_pts_per_cloud=25000,
                  target_class="vehicle",
                  pos_neg_iou_thresh=[0.6,0.45],
-                 version="v1.0-mini", ) -> None:
+                 version="v1.0-mini",
+                 mode="train",
+                 seed=123+456*789,
+                 train_percentage=0.8) -> None:
         super().__init__()
 
         self.nusc = NuScenes(version=version,dataroot=path,verbose=True)
@@ -391,8 +394,22 @@ class NusceneDataset(data.Dataset):
                 self.sample_tokens.append(sample_token)
                 sample_token = self.nusc.get("sample",sample_token)["next"]
 
+        n_samples = len(self.sample_tokens)
+        logger.info(f"Total number of samples: {n_samples}")
+
+        # use the seed to shuffle the sample tokens
+        np.random.seed(seed)
+        ind = np.random.permutation(n_samples)
+
+        p = train_percentage
+        if mode == "train":
+            self.sample_tokens = \
+                [self.sample_tokens[i] for i in ind[:int(p*n_samples)]]
+        elif mode == "test":
+            self.sample_tokens = \
+                [self.sample_tokens[i] for i in ind[int(p*n_samples):]]
+        logger.info(f"Number of samples for {mode}: {len(self.sample_tokens)}")
         self.n_samples = len(self.sample_tokens)
-        logger.info(f"Total number of samples: {self.n_samples}")
 
         # compute the diagonal length of each anchor box
         for a in self.anchors:
@@ -617,7 +634,7 @@ class NusceneDataset(data.Dataset):
 
         # return a dictionary of the following variables with the same key name:
         # lidar_pts, pos_anchor_id_mask, neg_anchor_id_mask, reg_target
-        return {"lidar_pts":torch.tensor(lidar_pts).to("cuda"),
-                "pos_anchor_id_mask":torch.tensor(pos_anchor_id_mask).to("cuda"),
-                "neg_anchor_id_mask":torch.tensor(neg_anchor_id_mask).to("cuda"),
-                "reg_target":torch.tensor(reg_target).to("cuda")}
+        return {"lidar_pts":torch.tensor(lidar_pts,dtype=torch.float32),
+                "pos_anchor_id_mask":torch.tensor(pos_anchor_id_mask,dtype=torch.float32),
+                "neg_anchor_id_mask":torch.tensor(neg_anchor_id_mask,dtype=torch.float32),
+                "reg_target":torch.tensor(reg_target,dtype=torch.float32)}
