@@ -16,8 +16,6 @@ class SpatialConvolution(nn.Module):
                  to_BEV=True):
         super().__init__()
 
-        # note the stride and padding in the original paper are different
-        # from the ones listed here. Original uses ZYX while here uses XYZ
         # self.conv1 = spconv.SparseConv3d(n_feat_in, 64,kernel_size=3,
         #                                  stride=[2,1,1],padding=[1,1,1],
         #                                  indice_key="sp1",
@@ -57,7 +55,7 @@ class SpatialConvolution(nn.Module):
         self.to_BEV = to_BEV
                                          
         
-    def forward(self, feature, coords,spatial_shape, batch_size):
+    def forward(self, feature, coords, spatial_shape, batch_size):
 
         input_sp = spconv.SparseConvTensor(feature, coords,
                                            spatial_shape, batch_size)

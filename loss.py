@@ -3,10 +3,9 @@ from torch import nn
 from einops import rearrange, repeat
 
 class VoxelNetLoss(nn.Module):
-    def __init__(self, 
+    def __init__(self,
                  pos_cls_weight=1.5,
                  neg_cls_weight=1.0,
-
                  *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 

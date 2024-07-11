@@ -4,7 +4,7 @@ import torch
 from torch import nn
 from einops import pack
 
-class RPN(nn.Module):
+class RegionProposalNet(nn.Module):
     """implement the region proposal network from the voxelnet paper
 
     Args:

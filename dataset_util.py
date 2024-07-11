@@ -79,7 +79,8 @@ def inv_transform(T):
 
 def get_lidar_pts_singlesweep(nusc, sample, sensor="LIDAR_TOP",
                               convert_to_ego_frame=True,
-                              min_dist=1.0):
+                              min_dist=1.0,
+                              nkeep="all"):
     """returns the lidar points for a single sweep
 
     Args:
@@ -102,7 +103,7 @@ def get_lidar_pts_singlesweep(nusc, sample, sensor="LIDAR_TOP",
 
     # get ego pose and transformation
     ego_pose = get_ego_pose(nusc,sample,sensor)
-    car_ref_global = transform_matrix_from_pose(ego_pose,inverse=False)
+    # car_ref_global = transform_matrix_from_pose(ego_pose,inverse=False)
 
     # get sensor ref car transformation
     sensor_ref_car = transform_matrix_from_pose(
@@ -114,7 +115,17 @@ def get_lidar_pts_singlesweep(nusc, sample, sensor="LIDAR_TOP",
     # convert sensor points to car body frame
     pc.transform(sensor_ref_car)
 
-    return pc.points.T
+    data = pc.points.T
+    dist = np.linalg.norm(data[:,:2],axis=-1,keepdims=False)
+    ind = np.argsort(dist)
+    if nkeep != "all":
+        if nkeep <= len(ind):
+            data = data[ind[:nkeep],:]
+        else:
+            data = data[ind,:]
+            data = np.vstack([data,np.zeros((nkeep-len(ind),data.shape[1]))])
+
+    return data
 
 def get_lidar_pts_multisweep(scene,
                               nusc : "NuScene",
@@ -211,7 +222,7 @@ def plot_lidar_multisweep(lidar_pts):
 
 def plot_lidar(lidar_pts,show=True):
     plt.figure(figsize=(12,12),dpi=300)
-    if not isinstance(lidar_pts, np.ndarray):
+    if isinstance(lidar_pts, LidarPointCloud):
         lidar_pts = lidar_pts.points.T
     plt.scatter(lidar_pts[:,0],lidar_pts[:,1],0.02)
     plt.gca().set_aspect("equal")
@@ -351,17 +362,21 @@ class NusceneDataset(data.Dataset):
                  canvas_res_hw,
                  canvas_min_hw,
                  anchors,
+                 max_pts_per_cloud=25000,
                  target_class="vehicle",
                  pos_neg_iou_thresh=[0.6,0.45],
                  version="v1.0-mini", ) -> None:
         super().__init__()
 
         self.nusc = NuScenes(version=version,dataroot=path,verbose=True)
+        self.max_pts_per_cloud = max_pts_per_cloud
 
         self.canvas_h = canvas_h # lateral axis, eg 400 (as in voxelnet paper)
-        self.canvas_w = canvas_w # anterior-posterior axis, eg 352 
+        self.canvas_w = canvas_w # anterior-posterior axis, eg 352
         self.canvas_res_hw = canvas_res_hw # resolution of the canvas
-        self.canvas_min_hw = canvas_min_hw # offset of the canvas
+        self.canvas_min_hw = canvas_min_hw # min of the canvas
+        self.canvas_max_hw = [canvas_min_hw[0]+canvas_res_hw[0]*canvas_h,
+                              canvas_min_hw[1]+canvas_res_hw[1]*canvas_w]
         self.anchors = anchors # list of 3d anchor boxes, specified as l,w,h,yaw
         self.target_class = target_class
         self.pos_neg_iou_thresh = pos_neg_iou_thresh
@@ -395,24 +410,20 @@ class NusceneDataset(data.Dataset):
             self.create_2d_bbox_on_canvas()
 
     def create_2d_bbox_on_canvas(self,):
+        # h->y w->x
         h = self.canvas_res_hw[0]*np.arange(self.canvas_h)+\
             self.canvas_min_hw[0]+self.canvas_res_hw[0]/2
         w = self.canvas_res_hw[1]*np.arange(self.canvas_w)+\
             self.canvas_min_hw[1]+self.canvas_res_hw[1]/2
         
-        print(h,w)
-
         hg, wg = np.meshgrid(h,w, indexing="ij") # h x w
-        print(hg.shape)
-        print(hg)
         hg = rearrange(hg,"h w -> (h w) 1")
         wg = rearrange(wg,"h w -> (h w) 1")
-        canvas_grid = np.hstack([hg,wg]) # m by 2
-        print(canvas_grid)
+        canvas_grid = np.hstack([wg,hg]) # m by 2; notice wg comes before hg
+                                         # as w is x and h is y
+
         # by m by n_anchor by 2
         anchor_center = repeat(canvas_grid,"m n -> m na n",na=self.n_anchor)
-        print(anchor_center.shape)
-        print(anchor_center)
 
         # create box offsets
         L = np.array([a["l"] for a in self.anchors])[:,np.newaxis]# nanchor by 1
@@ -430,9 +441,6 @@ class NusceneDataset(data.Dataset):
         y_ = rearrange(W/2*yg,"na d -> na 1 d", d=4)
         xy,_ = pack([x_,y_],"na * d") # nanchor x 2 x 4
 
-        print(xy.shape)
-        print(xy)
-
         xy = einsum(rot_mat, xy, "na a b, na b c -> na a c")# nx2x4
 
         # broadcast addition
@@ -448,6 +456,7 @@ class NusceneDataset(data.Dataset):
         anchor_box_2corners = rearrange(anchor_box_2corners,
                                         "m na n -> (m na) n")
         
+        print(self.canvas_h, type(self.canvas_h))
         anchor_center = rearrange(anchor_center, "(h w) na n -> h w na n",
                                   h=self.canvas_h)
         anchor_box = rearrange(anchor_box, "(h w) na n d -> h w na n d",
@@ -456,6 +465,15 @@ class NusceneDataset(data.Dataset):
             
     def __len__(self):
         return self.n_samples
+    
+    def exclude_out_of_range_gtbox(self,gt_boxes):
+        # h->y w->x
+        mask = (gt_boxes[:,0] >= self.canvas_min_hw[1]) & \
+               (gt_boxes[:,0] < self.canvas_max_hw[1]) & \
+               (gt_boxes[:,1] >= self.canvas_min_hw[0]) & \
+               (gt_boxes[:,1] < self.canvas_max_hw[0])
+        
+        return gt_boxes[mask,:] # n by 7
     
     def compute_target(self, gt_boxes):
         """_summary_
@@ -468,6 +486,7 @@ class NusceneDataset(data.Dataset):
         Returns:
             _type_: _description_
         """
+        gt_boxes = self.exclude_out_of_range_gtbox(gt_boxes)
         
         n_gt_box = gt_boxes.shape[0]
         gt_x,gt_y,gt_z,gt_l,gt_w,gt_h,gt_yaw = \
@@ -478,7 +497,7 @@ class NusceneDataset(data.Dataset):
         # get 2d corners, upper left and lower right bounding box
         gt_2d_2corners = get_2d_upper_lower_corners(gt_2d_4corners) # n by 2
 
-        print(gt_2d_2corners)
+        # print(gt_2d_2corners)
 
         # calculate upper and lower corner for the anchors
         n_anchor_box = self.anchor_box_2corners.shape[0]
@@ -488,8 +507,8 @@ class NusceneDataset(data.Dataset):
             gt_2d_2corners.astype(np.float32),
         ) # nanchor by ngtbox
 
-        print(iou.shape)
-        print(iou)
+        # print(iou.shape)
+        # print(iou)
 
         # for each ground truth box, find the highest iou anchor
         highest_iou_anchor_id = np.argmax(iou,axis=0)
@@ -568,6 +587,9 @@ class NusceneDataset(data.Dataset):
                                 (self.canvas_h,self.canvas_w,self.n_anchor))
         neg_anchor_id_mask[ind_x_n,ind_y_n,ind_a_n] = 1.0
 
+        # make sure pos and neg mask have no overlap
+        neg_anchor_id_mask = neg_anchor_id_mask*(1-pos_anchor_id_mask)
+
         return pos_anchor_id_mask, neg_anchor_id_mask, reg_target
     
     def get_lidar_pts(self, ind):
@@ -576,7 +598,8 @@ class NusceneDataset(data.Dataset):
 
         lidar_pts = get_lidar_pts_singlesweep(self.nusc,sample,
                                               convert_to_ego_frame=True,
-                                              min_dist=1.0)
+                                              min_dist=1.0,
+                                              nkeep=self.max_pts_per_cloud)
         return lidar_pts
     
     def __getitem__(self, ind):
@@ -592,4 +615,9 @@ class NusceneDataset(data.Dataset):
         # get the lidar points
         lidar_pts = self.get_lidar_pts(ind)
 
-        return lidar_pts, pos_anchor_id_mask, neg_anchor_id_mask, reg_target
+        # return a dictionary of the following variables with the same key name:
+        # lidar_pts, pos_anchor_id_mask, neg_anchor_id_mask, reg_target
+        return {"lidar_pts":torch.tensor(lidar_pts).to("cuda"),
+                "pos_anchor_id_mask":torch.tensor(pos_anchor_id_mask).to("cuda"),
+                "neg_anchor_id_mask":torch.tensor(neg_anchor_id_mask).to("cuda"),
+                "reg_target":torch.tensor(reg_target).to("cuda")}
