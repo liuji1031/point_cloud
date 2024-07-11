@@ -1,10 +1,10 @@
 import torch
 from einops import rearrange
-from torch import nn
+from torch import nn, jit
 import spconv.pytorch as spconv
 
 
-class SpatialConvolution(nn.Module):
+class SpatialConvolution(jit.ScriptModule):
     """implement some 3D spatial convolution layers as in the original voxelnet
     paper
 
@@ -54,7 +54,7 @@ class SpatialConvolution(nn.Module):
         
         self.to_BEV = to_BEV
                                          
-        
+    @jit.script_method
     def forward(self, feature, coords, spatial_shape, batch_size):
 
         input_sp = spconv.SparseConvTensor(feature, coords,
