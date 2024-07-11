@@ -1,5 +1,6 @@
 import numpy as np
 import numba
+import torch
 from einops import rearrange, pack, reduce
 
 @numba.njit
@@ -149,5 +150,11 @@ class Voxelization():
         coord_batch = np.concatenate(coord_batch,axis=0)
         mask_batch = np.concatenate(mask_batch, axis=0)
         vox_center_batch = np.concatenate(vox_center_batch, axis=0)
+
+        # convert to torch tensor
+        voxel_batch = torch.tensor(voxel_batch,dtype=torch.float32)
+        coord_batch = torch.tensor(coord_batch,dtype=torch.float32)
+        mask_batch = torch.tensor(mask_batch,dtype=torch.float32)
+        vox_center_batch = torch.tensor(vox_center_batch,dtype=torch.float32)
 
         return voxel_batch, coord_batch, mask_batch, vox_center_batch

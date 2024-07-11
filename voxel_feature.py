@@ -1,10 +1,11 @@
 import numpy as np
 import torch
 from torch import nn
+from torch import jit
 from einops import rearrange, pack
 from einops.layers.torch import Rearrange, Reduce
 
-class VoxelFeatureExtractionLayer(nn.Module):
+class VoxelFeatureExtractionLayer(jit.ScriptModule):
     """Implements the VFE layer in VoxelNet
 
     Args:
@@ -35,6 +36,7 @@ class VoxelFeatureExtractionLayer(nn.Module):
         # max over all points in a voxel
         self.maxpool = Reduce("b p d -> b 1 d", "max")
 
+    @jit.script_method
     def forward(self, voxel_batch, mask):
         """compute the initial decorated point cloud, including offset towards
         vox center
@@ -43,7 +45,11 @@ class VoxelFeatureExtractionLayer(nn.Module):
 
         # apply masking using broadcasting, necessary if allow bias in previous
         # linear layer
-        mask_ = rearrange(mask,"nvox npt -> nvox npt 1")
+
+        # equivalent einops code:
+        # mask_ = rearrange(mask,"nvox npt -> nvox npt 1")
+        mask_ = torch.unsqueeze(mask, -1)
+
         out = out*mask_
 
         # apply the rest of the pipeline
@@ -57,14 +63,22 @@ class VoxelFeatureExtractionLayer(nn.Module):
 
         if self.append_aggregate:
             # concatenate over feature dimension
-            out,_ = pack([out, out_max.expand_as(out)],"b p *")
+
+            # equivalent einops code:
+            # out,_ = pack([out, out_max.expand_as(out)],"b p *")
+            out = torch.cat((out, out_max.expand_as(out)),dim=-1)
+
             assert(out.shape[-1]==self.n_feat_out)
             return out
         else: # just return aggregated feature
-            out_max = rearrange(out_max, "b 1 d->b d") # squeeze
+
+            # equivalent einops code:
+            # out_max = rearrange(out_max, "b 1 d->b d") # squeeze
+            out_max = torch.squeeze(out_max, dim=1)
+
             return out_max
 
-class VoxelFeatureExtraction(nn.Module):
+class VoxelFeatureExtraction(jit.ScriptModule):
 
     def __init__(self,
                  n_feat_in,
@@ -78,7 +92,7 @@ class VoxelFeatureExtraction(nn.Module):
 
         n_hidden_layer = len(n_hidden_per_layer)
 
-        self.layers = []
+        self.layers = nn.ModuleList()
         n_in = n_feat_in
         for i in range(n_hidden_layer):
             n_out = n_hidden_per_layer[i]
@@ -89,7 +103,8 @@ class VoxelFeatureExtraction(nn.Module):
         # last layer, without appending aggregate
         self.layers.append(VoxelFeatureExtractionLayer(n_in,n_feat_out,
                                                   append_aggregate=False))
-        
+    
+    @jit.script_method
     def forward(self, voxel_batch, mask):
         x = voxel_batch
         for vfe in self.layers:
