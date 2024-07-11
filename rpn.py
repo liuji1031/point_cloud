@@ -1,10 +1,10 @@
 # implement the region proposal net from voxelnet paper
 
 import torch
-from torch import nn
+from torch import nn, jit
 from einops import pack
 
-class RegionProposalNet(nn.Module):
+class RegionProposalNet(jit.ScriptModule):
     """implement the region proposal network from the voxelnet paper
 
     Args:
@@ -71,23 +71,22 @@ class RegionProposalNet(nn.Module):
                                                add_bn=False,
                                                add_relu=False))
 
+    @jit.script_method
     def forward(self, x):
 
         x1 = self.block1(x)
         x2 = self.block2(x1)
         x3 = self.block3(x2)
 
-        print(x1.shape, x2.shape, x3.shape)
-
         # deconvolution
         x1_ = self.deconv1(x1)
         x2_ = self.deconv2(x2)
         x3_ = self.deconv3(x3)
 
-        print(x1_.shape, x2_.shape, x3_.shape)
-
         # concatenate
-        x,_ = pack([x1_,x2_,x3_],"b * h w")
+        # equivalent einops code:
+        # x,_ = pack([x1_,x2_,x3_],"b * h w")
+        x = torch.cat((x1_,x2_,x3_),dim=1)
 
         cls = self.head1(x)
         # apply sigmoid on cls
