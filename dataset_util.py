@@ -359,9 +359,10 @@ class NusceneDataset(data.Dataset):
                  path,
                  canvas_h,
                  canvas_w,
-                 canvas_res_hw,
-                 canvas_min_hw,
+                 canvas_res,
+                 canvas_min,
                  anchors,
+                 voxelizer,
                  max_pts_per_cloud=25000,
                  target_class="vehicle",
                  pos_neg_iou_thresh=[0.6,0.45],
@@ -373,13 +374,14 @@ class NusceneDataset(data.Dataset):
 
         self.nusc = NuScenes(version=version,dataroot=path,verbose=True)
         self.max_pts_per_cloud = max_pts_per_cloud
+        self.voxelizer = voxelizer
 
         self.canvas_h = canvas_h # lateral axis, eg 400 (as in voxelnet paper)
         self.canvas_w = canvas_w # anterior-posterior axis, eg 352
-        self.canvas_res_hw = canvas_res_hw # resolution of the canvas
-        self.canvas_min_hw = canvas_min_hw # min of the canvas
-        self.canvas_max_hw = [canvas_min_hw[0]+canvas_res_hw[0]*canvas_h,
-                              canvas_min_hw[1]+canvas_res_hw[1]*canvas_w]
+        self.canvas_res = canvas_res # resolution of the canvas
+        self.canvas_min = canvas_min # min of the canvas
+        self.canvas_max = {"h":canvas_min["h"]+canvas_res["h"]*canvas_h,
+                           "w":canvas_min["w"]+canvas_res["w"]*canvas_w}
         self.anchors = anchors # list of 3d anchor boxes, specified as l,w,h,yaw
         self.target_class = target_class
         self.pos_neg_iou_thresh = pos_neg_iou_thresh
@@ -428,10 +430,10 @@ class NusceneDataset(data.Dataset):
 
     def create_2d_bbox_on_canvas(self,):
         # h->y w->x
-        h = self.canvas_res_hw[0]*np.arange(self.canvas_h)+\
-            self.canvas_min_hw[0]+self.canvas_res_hw[0]/2
-        w = self.canvas_res_hw[1]*np.arange(self.canvas_w)+\
-            self.canvas_min_hw[1]+self.canvas_res_hw[1]/2
+        h = self.canvas_res["h"]*np.arange(self.canvas_h)+\
+            self.canvas_min["h"]+self.canvas_res["h"]/2
+        w = self.canvas_res["w"]*np.arange(self.canvas_w)+\
+            self.canvas_min["w"]+self.canvas_res["w"]/2
         
         hg, wg = np.meshgrid(h,w, indexing="ij") # h x w
         hg = rearrange(hg,"h w -> (h w) 1")
@@ -473,7 +475,6 @@ class NusceneDataset(data.Dataset):
         anchor_box_2corners = rearrange(anchor_box_2corners,
                                         "m na n -> (m na) n")
         
-        print(self.canvas_h, type(self.canvas_h))
         anchor_center = rearrange(anchor_center, "(h w) na n -> h w na n",
                                   h=self.canvas_h)
         anchor_box = rearrange(anchor_box, "(h w) na n d -> h w na n d",
@@ -485,10 +486,10 @@ class NusceneDataset(data.Dataset):
     
     def exclude_out_of_range_gtbox(self,gt_boxes):
         # h->y w->x
-        mask = (gt_boxes[:,0] >= self.canvas_min_hw[1]) & \
-               (gt_boxes[:,0] < self.canvas_max_hw[1]) & \
-               (gt_boxes[:,1] >= self.canvas_min_hw[0]) & \
-               (gt_boxes[:,1] < self.canvas_max_hw[0])
+        mask = (gt_boxes[:,0] >= self.canvas_min["w"]) & \
+               (gt_boxes[:,0] < self.canvas_max["w"]) & \
+               (gt_boxes[:,1] >= self.canvas_min["h"]) & \
+               (gt_boxes[:,1] < self.canvas_max["h"])
         
         return gt_boxes[mask,:] # n by 7
     
@@ -632,9 +633,17 @@ class NusceneDataset(data.Dataset):
         # get the lidar points
         lidar_pts = self.get_lidar_pts(ind)
 
+        # perform voxelization here
+        voxel, coord, mask = self.voxelizer(lidar_pts)
+
+
         # return a dictionary of the following variables with the same key name:
         # lidar_pts, pos_anchor_id_mask, neg_anchor_id_mask, reg_target
-        return {"lidar_pts":torch.tensor(lidar_pts,dtype=torch.float32),
-                "pos_anchor_id_mask":torch.tensor(pos_anchor_id_mask,dtype=torch.float32),
-                "neg_anchor_id_mask":torch.tensor(neg_anchor_id_mask,dtype=torch.float32),
+        return {"voxel":torch.tensor(voxel,dtype=torch.float32),
+                "coord":torch.tensor(coord,dtype=torch.float32),
+                "mask":torch.tensor(mask,dtype=torch.float32),
+                "pos_anchor_id_mask":torch.tensor(pos_anchor_id_mask,
+                                                  dtype=torch.float32),
+                "neg_anchor_id_mask":torch.tensor(neg_anchor_id_mask,
+                                                  dtype=torch.float32),
                 "reg_target":torch.tensor(reg_target,dtype=torch.float32)}

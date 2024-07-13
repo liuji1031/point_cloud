@@ -1,6 +1,7 @@
 import torch
 from torch import nn
-from voxel_feature import Voxelization, VoxelFeatureExtraction
+from voxelization import Voxelization
+from voxel_feature import VoxelFeatureExtraction
 from spatial_conv import SpatialConvolution
 from rpn import RegionProposalNet
 from loss import VoxelNetLoss
@@ -23,14 +24,7 @@ class VoxelNet(nn.Module):
         self.name="VoxelNet"
 
         # x: front, y: left, z: up
-        self.voxelization = Voxelization(x_min=x_range[0],x_max=x_range[1],
-                                         y_min=y_range[0],y_max=y_range[1],
-                                         z_min=z_range[0],z_max=z_range[1],
-                                         voxel_size=(voxel_size["x"],
-                                                     voxel_size["y"],
-                                                     voxel_size["z"]),
-                                         max_voxel_pts=max_voxel_pts,
-                                         init_decoration=True)
+        self.voxelization = None
         # 4 features in: x,y,z,intensity
         # after decoration, 7 features in
         self.voxel_feature = VoxelFeatureExtraction(n_feat_in=7,
@@ -39,6 +33,7 @@ class VoxelNet(nn.Module):
         
         # spatial convolution
         self.scn = SpatialConvolution(n_feat_in=128, to_BEV=True)
+        self.scn = torch.comple(self.scn)
 
         # region proposal network
         self.rpn = RegionProposalNet(nanchor=len(anchors))
@@ -48,14 +43,17 @@ class VoxelNet(nn.Module):
 
     def forward(self, input_dict):
 
-        pc = input_dict["lidar_pts"]
+        voxel_batch = input_dict["voxel_batch"]
+        mask_batch = input_dict["mask_batch"]
+        coord_batch = input_dict["coord_batch"]
+
+        
+
         pos_anchor_id_mask = input_dict["pos_anchor_id_mask"]
         neg_anchor_id_mask = input_dict["neg_anchor_id_mask"]
         reg_target = input_dict["reg_target"]
 
-        # voxelization
-        voxel_batch, coord_batch, mask_batch, vox_center_batch = \
-            self.voxelization(pc)
+        # voxelization moved into dataset util
         
         # voxel feature extraction
         # first dim of coord indicates which batch the point comes from
@@ -77,4 +75,4 @@ class VoxelNet(nn.Module):
         loss = self.loss(cls_head, reg_head,
                          pos_anchor_id_mask, neg_anchor_id_mask, reg_target)
         
-        return loss
+        return (cls_head, reg_head), loss

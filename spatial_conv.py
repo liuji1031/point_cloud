@@ -4,7 +4,7 @@ from torch import nn, jit
 import spconv.pytorch as spconv
 
 
-class SpatialConvolution(jit.ScriptModule):
+class SpatialConvolution(nn.Module):
     """implement some 3D spatial convolution layers as in the original voxelnet
     paper
 
@@ -54,7 +54,6 @@ class SpatialConvolution(jit.ScriptModule):
         
         self.to_BEV = to_BEV
                                          
-    @jit.script_method
     def forward(self, feature, coords, spatial_shape, batch_size):
 
         input_sp = spconv.SparseConvTensor(feature, coords,
@@ -68,10 +67,14 @@ class SpatialConvolution(jit.ScriptModule):
         # x = self.conv3(x)
         # print(x.dense().shape)
 
-        x = self.net(input_sp)
+        x : spconv.SparseConvTensor = self.net(input_sp)
 
         if self.to_BEV:
             # concatenate channel and depth dimension
-            x : spconv.SparseConvTensor
+
+            # equivalent einops code:
             x = rearrange(x.dense(),"b c d h w -> b (c d) h w")
+
+            # x : torch.Tensor = x.dense()
+            # x = torch.reshape(x, (x.shape[0],-1,x.shape[2],x.shape[3]))
         return x
