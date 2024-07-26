@@ -6,8 +6,8 @@ In this project, I aim to first implement VoxelNet to explore some backbone enco
 
 The training script requires the following: <br />
 
-PyTorch <br />
-Spconv  <br />
+torch <br />
+spconv  <br />
 einops  <br />
 
 The dataset I used is the [Nuscenes](https://www.nuscenes.org/nuscenes) dataset. Only LiDAR data are needed for now. 
@@ -16,3 +16,8 @@ The dataset I used is the [Nuscenes](https://www.nuscenes.org/nuscenes) dataset.
 Some preliminary training result is shown below. In the figure, the ground truth bounding box for vehicles are shown in green. The prediction made by the model is shown in blue dashed lines. Some of the predictions match with ground truth bounding quite well.
 
 ![](output.png)
+
+## Training
+
+For training:
+`python train.py`
