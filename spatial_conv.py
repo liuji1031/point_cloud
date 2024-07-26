@@ -73,8 +73,8 @@ class SpatialConvolution(nn.Module):
             # concatenate channel and depth dimension
 
             # equivalent einops code:
-            x = rearrange(x.dense(),"b c d h w -> b (c d) h w")
+            # x = rearrange(x.dense(),"b c d h w -> b (c d) h w")
 
-            # x : torch.Tensor = x.dense()
-            # x = torch.reshape(x, (x.shape[0],-1,x.shape[2],x.shape[3]))
+            x : torch.Tensor = x.dense()
+            x = torch.reshape(x, (x.shape[0],-1,x.shape[-2],x.shape[-1]))
         return x
