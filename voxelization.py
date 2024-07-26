@@ -99,34 +99,34 @@ class Voxelization():
         
         # construct voxel
         n_vox = unique_coord.shape[0]
-        print(f"n_vox: {n_vox}")
+        # print(f"n_vox: {n_vox}")
         voxel = np.zeros((n_vox,self.max_voxel_pts,n_feat))
         
         _voxelization(unique_coord, inverse_ind, counts, pc, voxel,
                       self.max_voxel_pts)
         
-        if self.max_voxel_num:
-            # subsample if necessary
-            if n_vox > self.max_voxel_num:
-                # keep only max_voxel_num voxels, sort by counts, keep the one
-                # with the highest counts
+        # if self.max_voxel_num:
+        #     # subsample if necessary
+        #     if n_vox > self.max_voxel_num:
+        #         # keep only max_voxel_num voxels, sort by counts, keep the one
+        #         # with the highest counts
 
-                ind = np.argsort(counts)[::-1] # descending order
-                ind_keep = np.sort(ind[:self.max_voxel_num])
-                # ind_discard = ind[self.max_voxel_num:]
-                counts = counts[ind_keep]
-                unique_coord = unique_coord[ind_keep,:]
-                voxel = voxel[ind_keep]
+        #         ind = np.argsort(counts)[::-1] # descending order
+        #         ind_keep = np.sort(ind[:self.max_voxel_num])
+        #         # ind_discard = ind[self.max_voxel_num:]
+        #         counts = counts[ind_keep]
+        #         unique_coord = unique_coord[ind_keep,:]
+        #         voxel = voxel[ind_keep]
 
-            else:
-                # pad with zeros
-                n_pad = self.max_voxel_num - n_vox
-                unique_coord = np.pad(unique_coord,pad_width=((0,n_pad),(0,0)),
-                                      mode="constant",constant_values=0)
-                counts = np.pad(counts,pad_width=(0,n_pad),
-                                mode="constant",constant_values=0)
-                voxel = np.pad(voxel,pad_width=((0,n_pad),(0,0),(0,0)),
-                               mode="constant",constant_values=0.)
+        #     else:
+        #         # pad with zeros
+        #         n_pad = self.max_voxel_num - n_vox
+        #         unique_coord = np.pad(unique_coord,pad_width=((0,n_pad),(0,0)),
+        #                               mode="constant",constant_values=0)
+        #         counts = np.pad(counts,pad_width=(0,n_pad),
+        #                         mode="constant",constant_values=0)
+        #         voxel = np.pad(voxel,pad_width=((0,n_pad),(0,0),(0,0)),
+        #                        mode="constant",constant_values=0.)
 
         # generate masking for voxel entries not populated by points by
         # broadcasting
@@ -151,7 +151,7 @@ class Voxelization():
                 rearrange(mask,"nvox npt -> nvox npt 1")
             voxel,_ = pack([voxel, diff],"nvox npt *")
 
-        return voxel, unique_coord, mask
+        return voxel, unique_coord, mask, counts
 
     def __call__(self, point_cloud : np.ndarray):
         """parse point cloud into voxels
@@ -161,6 +161,6 @@ class Voxelization():
             shape (npoints, nfeatures) 
         """
 
-        voxel, coord, mask = self.process_single_batch_pc(point_cloud)
+        voxel, coord, mask, counts = self.process_single_batch_pc(point_cloud)
 
-        return voxel, coord, mask
+        return voxel, coord, mask, counts
