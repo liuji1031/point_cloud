@@ -4,8 +4,13 @@ from numpy.linalg import multi_dot
 from copy import copy, deepcopy
 from pathlib import Path
 import matplotlib.pyplot as plt
+import torch.utils
 import torch.utils.data as data
 import torch
+import pickle
+from copy import deepcopy
+import blosc
+from tqdm import tqdm
 from loguru import logger
 from einops import rearrange, pack, einsum, reduce, repeat
 from pyquaternion import Quaternion
@@ -279,6 +284,20 @@ def get_gt_boxes(nusc : NuScenes, sample, target_class="vehicle", render=False):
 
     return np.array(gt_boxes), boxes
 
+def plot_box_2d(gt_boxes,linespec="b--"):
+    x,y,z,l,w,h,yaw = gt_boxes[:,[0]], gt_boxes[:,[1]], gt_boxes[:,[2]], \
+        gt_boxes[:,[3]], gt_boxes[:,[4]], gt_boxes[:,[5]], gt_boxes[:,[6]]
+    corners = get_2d_corners(x,y,l,w,yaw)
+
+    plot_box_2d_corners(corners,linespec)
+
+def plot_box_2d_corners(corners,linespec="b--"):
+    seq = [0,1,3,2]
+    for i in range(corners.shape[0]):
+        x = np.concatenate([corners[i,0,seq], corners[i,0,0][np.newaxis]])
+        y = np.concatenate([corners[i,1,seq], corners[i,1,0][np.newaxis]])
+        plt.plot(x,y,linespec)
+
 # def gt_boxes_to_array(gt_boxes):
 #     """save gt_boxes to numpy array; each key mapped to a single numpy array
 
@@ -356,7 +375,7 @@ def get_2d_upper_lower_corners(corners):
 class NusceneDataset(data.Dataset):
 
     def __init__(self,
-                 path,
+                 nusc,
                  canvas_h,
                  canvas_w,
                  canvas_res,
@@ -366,15 +385,20 @@ class NusceneDataset(data.Dataset):
                  max_pts_per_cloud=25000,
                  target_class="vehicle",
                  pos_neg_iou_thresh=[0.6,0.45],
-                 version="v1.0-mini",
+                 train_val_test_split=[0.8,0.1,0.1],
                  mode="train",
-                 seed=123+456*789,
-                 train_percentage=0.8) -> None:
+                 seed=0,
+                 aug_angles=None,
+                 load_preprocessed=False,
+                 load_lidar_from_disk=None) -> None:
         super().__init__()
 
-        self.nusc = NuScenes(version=version,dataroot=path,verbose=True)
+        self.load_preprocessed = load_preprocessed
+        self.load_lidar_from_disk = load_lidar_from_disk
+        self.nusc = nusc
         self.max_pts_per_cloud = max_pts_per_cloud
         self.voxelizer = voxelizer
+        self.aug_angles = aug_angles if aug_angles is not None else [0]
 
         self.canvas_h = canvas_h # lateral axis, eg 400 (as in voxelnet paper)
         self.canvas_w = canvas_w # anterior-posterior axis, eg 352
@@ -390,27 +414,52 @@ class NusceneDataset(data.Dataset):
 
         # go through all scenes and get all the sample tokens
         self.sample_tokens = []
-        for scene in self.nusc.scene:
-            sample_token = scene["first_sample_token"]
-            while sample_token != "":
-                self.sample_tokens.append(sample_token)
-                sample_token = self.nusc.get("sample",sample_token)["next"]
+        self.sample_tokens_by_scene = []
+        if self.nusc is None:
+            # load from disk
+            # use pickle to load from sample_tokens.pkl
+            logger.info("Loading sample tokens from disk")
+            self.sample_tokens_by_scene = \
+                load_pickle_compressed("sample_tokens_by_scene.pkl")
+        else:
+            for scene in self.nusc.scene:
+                tokens = []
+                sample_token = scene["first_sample_token"]
+                while sample_token != "":
+                    tokens.append(sample_token)
+                    sample_token = self.nusc.get("sample",sample_token)["next"]
+                self.sample_tokens_by_scene.append(tokens)
+                save_pickle_compressed(self.sample_tokens_by_scene,
+                                       "sample_tokens_by_scene.pkl")
 
-        n_samples = len(self.sample_tokens)
-        logger.info(f"Total number of samples: {n_samples}")
+        n_samples_total = np.sum([len(t) for t in self.sample_tokens_by_scene])
+        logger.info(f"Total number of samples: {n_samples_total}")
 
         # use the seed to shuffle the sample tokens
-        np.random.seed(seed)
-        ind = np.random.permutation(n_samples)
+        if seed is not None:
+            np.random.seed(seed)
 
-        p = train_percentage
-        if mode == "train":
-            self.sample_tokens = \
-                [self.sample_tokens[i] for i in ind[:int(p*n_samples)]]
-        elif mode == "test":
-            self.sample_tokens = \
-                [self.sample_tokens[i] for i in ind[int(p*n_samples):]]
-        logger.info(f"Number of samples for {mode}: {len(self.sample_tokens)}")
+        # now use stratified sampling to split samples from each scene into
+        # train, val, and test
+        for tokens in self.sample_tokens_by_scene:
+            n_samples = len(tokens)
+            split_ind = (np.cumsum(train_val_test_split)*n_samples).astype(int)
+            ind = np.random.permutation(n_samples)
+
+            if mode == "train":
+                self.sample_tokens += \
+                    [ tokens[i] for i in ind[:split_ind[0]] ]
+            elif mode == "val":
+                self.sample_tokens += \
+                    [ tokens[i] for i in ind[split_ind[0]:split_ind[1]] ]
+            elif mode == "test":
+                self.sample_tokens += \
+                    [ tokens[i] for i in ind[split_ind[1]:] ]
+            elif mode == "all":
+                self.sample_tokens += tokens
+
+        logger.info(
+            f"Number of samples for mode {mode}: {len(self.sample_tokens)}")
         self.n_samples = len(self.sample_tokens)
 
         # compute the diagonal length of each anchor box
@@ -504,9 +553,22 @@ class NusceneDataset(data.Dataset):
         Returns:
             _type_: _description_
         """
-        gt_boxes = self.exclude_out_of_range_gtbox(gt_boxes)
-        
-        n_gt_box = gt_boxes.shape[0]
+        if gt_boxes.shape[0]==0:
+            n_gt_box = 0
+        else:
+            gt_boxes = self.exclude_out_of_range_gtbox(gt_boxes)
+            n_gt_box = gt_boxes.shape[0]
+
+        if n_gt_box == 0:
+            pos_anchor_id_mask = np.zeros(
+            (self.canvas_h,self.canvas_w,self.n_anchor))
+            neg_anchor_id_mask = np.ones(
+                (self.canvas_h,self.canvas_w,self.n_anchor))
+            reg_target = np.zeros(
+                (self.canvas_h,self.canvas_w,self.n_anchor*7))
+            
+            return pos_anchor_id_mask, neg_anchor_id_mask, reg_target
+
         gt_x,gt_y,gt_z,gt_l,gt_w,gt_h,gt_yaw = \
             [gt_boxes[:,[_]] for _ in range(gt_boxes.shape[1])]
         gt_2d_4corners = get_2d_corners(gt_x,gt_y,gt_l,gt_w,gt_yaw)
@@ -519,8 +581,7 @@ class NusceneDataset(data.Dataset):
 
         # calculate upper and lower corner for the anchors
         n_anchor_box = self.anchor_box_2corners.shape[0]
-        iou = np.zeros((n_anchor_box,n_gt_box))
-        iou_box_array(iou,
+        iou = iou_box_array(
             self.anchor_box_2corners.astype(np.float32),
             gt_2d_2corners.astype(np.float32),
         ) # nanchor by ngtbox
@@ -618,32 +679,215 @@ class NusceneDataset(data.Dataset):
                                               convert_to_ego_frame=True,
                                               min_dist=1.0,
                                               nkeep=self.max_pts_per_cloud)
+    
         return lidar_pts
     
+    def rotate_lidar_pts(self, lidar_pts, angle, return_copy=True):
+        if angle == 0:
+            return lidar_pts if not return_copy else deepcopy(lidar_pts)
+        
+        rot_mat, _ = self.rot_mat_from_angle(angle)
+        lidar_pts_ = deepcopy(lidar_pts) if return_copy else lidar_pts
+        # rotate the lidar points
+        lidar_pts_[:,:2] = np.linalg.multi_dot([lidar_pts_[:,:2],rot_mat.T])
+
+        return lidar_pts_
+    
+    def rot_mat_from_angle(self,angle):
+        angle_rad = np.deg2rad(angle)
+        rot_mat = np.array([[np.cos(angle_rad),-np.sin(angle_rad)],
+                            [np.sin(angle_rad),np.cos(angle_rad)]])
+        return rot_mat, angle_rad
+
+    def rotate_gt_boxes(self,gt_boxes,angle,return_copy=True):
+        if angle == 0:
+            return gt_boxes if not return_copy else deepcopy(gt_boxes)
+        rot_mat, angle_rad = self.rot_mat_from_angle(angle)
+        gt_boxes_ = gt_boxes if not return_copy else deepcopy(gt_boxes)
+        gt_boxes_[:,:2] = np.linalg.multi_dot([gt_boxes_[:,:2],rot_mat.T])
+        gt_boxes_[:,6] += angle_rad
+
+        return gt_boxes_
+
     def __getitem__(self, ind):
 
         sample_token = self.sample_tokens[ind]
-        # get 3D bounding box
-        gt_boxes,_ = get_gt_boxes(self.nusc,
-                                  self.nusc.get("sample",sample_token),
-                                self.target_class)
+        # print(sample_token)
+
+        angle = 0 # default no augmentation
+        if len(self.aug_angles)>0: # more than 0 value specified
+            # choose an angle from self.aug_angles, which is a list
+            # of angles in degrees
+            angle = np.random.choice(self.aug_angles)
+            # print(f"random angle: {angle}")
+        
+        if self.load_lidar_from_disk is None:
+            # get the lidar points
+            lidar_pts = self.get_lidar_pts(ind)
+            # get 3D bounding box
+            gt_boxes, _  = get_gt_boxes(self.nusc, self.nusc.get("sample",sample_token),
+                                        self.target_class, render=False)
+        else:
+            path = Path(self.load_lidar_from_disk) / f"{sample_token}.pkl"
+            # print(f"loading {path}")
+            data = load_pickle_compressed(path)
+            lidar_pts = data["lidar_pts"]
+            gt_boxes = data["gt_boxes"]
+            
+        if angle != 0:
+            lidar_pts = self.rotate_lidar_pts(lidar_pts,angle,return_copy=False)
+            
+        if angle != 0 and gt_boxes.shape[0] > 0:
+            gt_boxes = self.rotate_gt_boxes(gt_boxes,angle,return_copy=False)
+
         pos_anchor_id_mask, neg_anchor_id_mask, reg_target = \
             self.compute_target(gt_boxes)
-        
-        # get the lidar points
-        lidar_pts = self.get_lidar_pts(ind)
 
         # perform voxelization here
-        voxel, coord, mask = self.voxelizer(lidar_pts)
+        voxel, coord, mask, counts = self.voxelizer(lidar_pts)
 
+        # convert to numpy array of similar precision
+        voxel = voxel.astype(np.float32)
+        coord = coord.astype(np.int32)
+        mask = mask.astype(np.float32)
+        # counts = counts.astype(np.int32)
+        pos_anchor_id_mask = pos_anchor_id_mask.astype(np.float32)
+        neg_anchor_id_mask = neg_anchor_id_mask.astype(np.float32)
+        reg_target = reg_target.astype(np.float32)
+
+        out = {"voxel":voxel,
+                "coord":coord,
+                "mask":mask,
+                "pos_anchor_id_mask":pos_anchor_id_mask,
+                "neg_anchor_id_mask":neg_anchor_id_mask,
+                "reg_target":reg_target,
+                "gt_boxes":gt_boxes,
+                "token":sample_token}
 
         # return a dictionary of the following variables with the same key name:
         # lidar_pts, pos_anchor_id_mask, neg_anchor_id_mask, reg_target
-        return {"voxel":torch.tensor(voxel,dtype=torch.float32),
-                "coord":torch.tensor(coord,dtype=torch.float32),
-                "mask":torch.tensor(mask,dtype=torch.float32),
-                "pos_anchor_id_mask":torch.tensor(pos_anchor_id_mask,
-                                                  dtype=torch.float32),
-                "neg_anchor_id_mask":torch.tensor(neg_anchor_id_mask,
-                                                  dtype=torch.float32),
-                "reg_target":torch.tensor(reg_target,dtype=torch.float32)}
+        return out
+    
+    def retrieve_by_token(self, sample_token):
+        for i, token in enumerate(self.sample_tokens):
+            if token == sample_token:
+                return self.__getitem__(i)
+        return None
+    
+    def get_lidar_pts_by_token(self, sample_token):
+        sample = self.nusc.get("sample",sample_token)
+
+        lidar_pts = get_lidar_pts_singlesweep(self.nusc,sample,
+                                              convert_to_ego_frame=True,
+                                              min_dist=1.0,
+                                              nkeep=self.max_pts_per_cloud)
+        return lidar_pts
+    
+    def save_lidar_gtbox_to_disk(self, save_disk_path):
+        for ind, sample in tqdm(enumerate(self.sample_tokens),
+                                total=len(self.sample_tokens)):
+            lidar_pts = self.get_lidar_pts(ind)
+            gt_boxes, _ = get_gt_boxes(self.nusc,self.nusc.get("sample",sample),
+                                        self.target_class, render=False)
+            save_path = Path(save_disk_path) / f"{sample}.pkl"
+            save_pickle_compressed({"lidar_pts":lidar_pts, "gt_boxes":gt_boxes},
+                                   save_path)
+
+def to_device(data,device):
+    for k,v in data.items():
+        if k=="gt_boxes":
+            continue
+        if isinstance(v,np.ndarray):
+            v = torch.from_numpy(v)
+        data[k] = v.to(device)
+    return data
+
+def save_pickle_compressed(data,save_path):
+    pickled_data = pickle.dumps(data)
+    compressed_pickle = blosc.compress(pickled_data)
+    with open(save_path,"wb") as f:
+        f.write(compressed_pickle)
+
+def load_pickle_compressed(load_path):
+    with open(load_path,"rb") as f:
+        compressed_pickle = f.read()
+    depressed_pickle = blosc.decompress(compressed_pickle)
+    return pickle.loads(depressed_pickle)
+
+from einops import pack
+def collate_fn(batches):
+    out = {}
+    voxel = []
+    coord = []
+    mask = []
+    pos_anchor_id_mask = []
+    neg_anchor_id_mask = []
+    reg_target = []
+    gt_boxes = []
+    tokens = []
+    for batch_ind, batch in enumerate(batches):
+
+        voxel.append(batch["voxel"])
+        coord.append(
+            np.pad(batch["coord"],
+                   pad_width=((0,0),(1,0)),
+                   mode="constant",constant_values=batch_ind)
+                   )
+        mask.append(batch["mask"])
+        pos_anchor_id_mask.append(batch["pos_anchor_id_mask"][np.newaxis,:])
+        neg_anchor_id_mask.append(batch["neg_anchor_id_mask"][np.newaxis,:])
+        reg_target.append(batch["reg_target"][np.newaxis,:])
+        gt_boxes.append(batch["gt_boxes"])
+        tokens.append(batch["token"])
+
+    voxel,_ = pack(voxel, "* p d")
+    coord,_ = pack(coord, "* d")
+    mask,_ = pack(mask, "* p")
+    pos_anchor_id_mask,_ = pack(pos_anchor_id_mask, "* h w na")
+    neg_anchor_id_mask,_ = pack(neg_anchor_id_mask, "* h w na")
+    reg_target,_ = pack(reg_target, "* h w naxd")
+    
+    # voxel = np.concatenate(voxel,axis=0)
+    # coord = np.concatenate(coord,axis=0)
+    # mask = np.concatenate(mask,axis=0)
+    # pos_anchor_id_mask = np.concatenate(pos_anchor_id_mask,axis=0)
+    # neg_anchor_id_mask = np.concatenate(neg_anchor_id_mask,axis=0)
+    # reg_target = np.concatenate(reg_target,axis=0)
+
+    out["voxel"] = torch.from_numpy(voxel)
+    out["coord"] = torch.from_numpy(coord)
+    out["mask"] = torch.from_numpy(mask)
+    out["pos_anchor_id_mask"] = torch.from_numpy(pos_anchor_id_mask)
+    out["neg_anchor_id_mask"] = torch.from_numpy(neg_anchor_id_mask)
+    out["reg_target"] = torch.from_numpy(reg_target)
+    out["gt_boxes"] = gt_boxes
+    out["tokens"] = tokens
+        
+    return out
+
+from config import cfg
+def get_database(mode, nusc=None):
+    nd = NusceneDataset(nusc=nusc,
+                    canvas_h=cfg.canvas_size["h"],
+                    canvas_w=cfg.canvas_size["w"],
+                    canvas_res=cfg.canvas_res,
+                    canvas_min=cfg.canvas_min,
+                    anchors=cfg.anchors,
+                    voxelizer=cfg.voxelizer,
+                    max_pts_per_cloud=cfg.max_points_per_cloud,
+                    pos_neg_iou_thresh=cfg.pos_neg_iou_thresh,
+                    train_val_test_split=cfg.train_val_test_split,
+                    aug_angles=cfg.aug_angles[mode],
+                    load_lidar_from_disk=cfg.lidar_path,
+                    mode=mode)
+    logger.info("First 5 sample tokens:")
+    for _ in range(5):
+        logger.info(nd.sample_tokens[_])
+
+    return nd
+
+from torch.utils.data import DataLoader
+def get_dataloader(dataset, batch_size, shuffle):
+    return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
+                      pin_memory=True,pin_memory_device="cuda",
+                      num_workers=16, collate_fn=collate_fn)
