@@ -1,5 +1,5 @@
 import torch
-from torch import nn
+from torch import nn, jit
 from einops import rearrange, repeat
 
 class VoxelNetLoss(nn.Module):
@@ -45,5 +45,7 @@ class VoxelNetLoss(nn.Module):
         total_loss = self.pos_cls_weight*loss_cls_pos + \
                         self.neg_cls_weight*loss_cls_neg + \
                         loss_smooth_l1
+        
+        # print(loss_cls_pos, loss_cls_neg, loss_smooth_l1)
         
         return total_loss
