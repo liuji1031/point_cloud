@@ -10,3 +10,9 @@ PyTorch <br />
 Spconv  <br />
 einops  <br />
 
+The dataset I used is the [Nuscenes](https://www.nuscenes.org/nuscenes) dataset. Only LiDAR data are needed for now. 
+
+## Preliminary result
+Some preliminary training result is shown below. In the figure, the ground truth bounding box for vehicles are shown in green. The prediction made by the model is shown in blue dashed lines. Some of the predictions match with ground truth bounding quite well.
+
+![](output.png)
