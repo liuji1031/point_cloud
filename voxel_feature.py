@@ -11,7 +11,8 @@ class VoxelFeatureExtractionLayer(jit.ScriptModule):
     Args:
         nn (_type_): _description_
     """
-    def __init__(self,n_feat_in, n_feat_out,append_aggregate=True):
+    def __init__(self,n_feat_in, n_feat_out,append_aggregate=True,
+                 dropout_rate=0.1):
         super().__init__()
 
         self.name = "VFELayer"
@@ -30,7 +31,8 @@ class VoxelFeatureExtractionLayer(jit.ScriptModule):
             Rearrange("b p d->b d p"), # such that 2nd dim is feature, for BN1d
             nn.BatchNorm1d(num_features=n_hidden, momentum=0.01),
             Rearrange("b d p-> b p d"), # rearrange back
-            nn.ReLU()
+            nn.ReLU(),
+            # nn.Dropout(dropout_rate)
         )
 
         # max over all points in a voxel
