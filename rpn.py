@@ -35,8 +35,10 @@ class RegionProposalNet(jit.ScriptModule):
             layers = []
             for _ in range(repeat):
                 
-                layers.append(nn.ConvTranspose2d(n_in, n_out, kernel_size=kernel_size,
-                          stride=stride, padding=padding))
+                layers.append(nn.ConvTranspose2d(n_in, n_out,
+                                                kernel_size=kernel_size,
+                                                stride=stride,
+                                                padding=padding))
 
                 if add_bn:
                     layers.append(nn.BatchNorm2d(n_out))
@@ -63,7 +65,7 @@ class RegionProposalNet(jit.ScriptModule):
         self.deconv2 = nn.Sequential(*deconv_block(128, 256, 2, 2, 0,repeat=1))
         self.deconv3 = nn.Sequential(*deconv_block(256, 256, 4, 4, 0,repeat=1))
 
-        self.head1 = nn.Sequential(*conv_block(768, 2, 1, 1, 0,repeat=1,
+        self.head1 = nn.Sequential(*conv_block(768, nanchor, 1, 1, 0,repeat=1,
                                                add_bn=False,
                                                add_relu=False))
         self.head2 = nn.Sequential(*conv_block(768, 7*nanchor, 1, 1, 0,
