@@ -26,7 +26,7 @@ def iou_two_boxes(boxA, boxB):
     return iou
 
 @numba.jit(nopython=True)
-def iou_box_array(iou_matrix, boxes1, boxes2):
+def _iou_box_array(iou_matrix,boxes1, boxes2):
     n = boxes1.shape[0]
     m = boxes2.shape[0]
     for i in range(n):
@@ -35,3 +35,12 @@ def iou_box_array(iou_matrix, boxes1, boxes2):
             boxB = boxes2[j]
 
             iou_matrix[i, j] = iou_two_boxes(boxA, boxB)
+
+def iou_box_array(boxes1, boxes2):
+
+    n = boxes1.shape[0]
+    m = boxes2.shape[0]
+    iou_matrix = np.zeros((n,m))
+
+    _iou_box_array(iou_matrix, boxes1, boxes2)
+    return iou_matrix
