@@ -6,12 +6,14 @@ class VoxelNetLoss(nn.Module):
     def __init__(self,
                  pos_cls_weight=1.5,
                  neg_cls_weight=1.0,
+                 l1_weight=1.0,
                  *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
 
         self.name = "VoxelNetLoss"
         self.pos_cls_weight = pos_cls_weight
         self.neg_cls_weight = neg_cls_weight
+        self.l1_weight = l1_weight
     
     def forward(self, cls_head, reg_head,
                 pos_anchor_id_mask, neg_anchor_id_mask, reg_target):
@@ -44,8 +46,11 @@ class VoxelNetLoss(nn.Module):
         
         total_loss = self.pos_cls_weight*loss_cls_pos + \
                         self.neg_cls_weight*loss_cls_neg + \
-                        loss_smooth_l1
+                        self.l1_weight*loss_smooth_l1
         
         # print(loss_cls_pos, loss_cls_neg, loss_smooth_l1)
+        individual_loss = {"cls_pos":loss_cls_pos,
+                           "cls_neg":loss_cls_neg,
+                           "smooth_l1":loss_smooth_l1}
         
-        return total_loss
+        return total_loss, individual_loss
