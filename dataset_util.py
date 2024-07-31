@@ -390,7 +390,8 @@ class NusceneDataset(data.Dataset):
                  seed=0,
                  aug_angles=None,
                  load_preprocessed=False,
-                 load_lidar_from_disk=None) -> None:
+                 load_lidar_from_disk=None,
+                 sample_pkl_path="/home/ji/Dropbox/Robotics/PointCloud/Project/point_cloud/sample_tokens_by_scene.pkl") -> None:
         super().__init__()
 
         self.load_preprocessed = load_preprocessed
@@ -420,7 +421,7 @@ class NusceneDataset(data.Dataset):
             # use pickle to load from sample_tokens.pkl
             logger.info("Loading sample tokens from disk")
             self.sample_tokens_by_scene = \
-                load_pickle_compressed("sample_tokens_by_scene.pkl")
+                load_pickle_compressed(sample_pkl_path)
         else:
             for scene in self.nusc.scene:
                 tokens = []
@@ -535,11 +536,15 @@ class NusceneDataset(data.Dataset):
     
     def exclude_out_of_range_gtbox(self,gt_boxes):
         # h->y w->x
+
+        if gt_boxes.shape[0] == 0:
+            return gt_boxes
+
         mask = (gt_boxes[:,0] >= self.canvas_min["w"]) & \
                (gt_boxes[:,0] < self.canvas_max["w"]) & \
                (gt_boxes[:,1] >= self.canvas_min["h"]) & \
                (gt_boxes[:,1] < self.canvas_max["h"])
-        
+
         return gt_boxes[mask,:] # n by 7
     
     def compute_target(self, gt_boxes):
@@ -556,7 +561,6 @@ class NusceneDataset(data.Dataset):
         if gt_boxes.shape[0]==0:
             n_gt_box = 0
         else:
-            gt_boxes = self.exclude_out_of_range_gtbox(gt_boxes)
             n_gt_box = gt_boxes.shape[0]
 
         if n_gt_box == 0:
@@ -733,6 +737,8 @@ class NusceneDataset(data.Dataset):
             data = load_pickle_compressed(path)
             lidar_pts = data["lidar_pts"]
             gt_boxes = data["gt_boxes"]
+        
+        gt_boxes = self.exclude_out_of_range_gtbox(gt_boxes)
             
         if angle != 0:
             lidar_pts = self.rotate_lidar_pts(lidar_pts,angle,return_copy=False)
@@ -795,7 +801,7 @@ class NusceneDataset(data.Dataset):
 
 def to_device(data,device):
     for k,v in data.items():
-        if k=="gt_boxes":
+        if k=="gt_boxes" or k=="tokens":
             continue
         if isinstance(v,np.ndarray):
             v = torch.from_numpy(v)
@@ -891,3 +897,8 @@ def get_dataloader(dataset, batch_size, shuffle):
     return DataLoader(dataset, batch_size=batch_size, shuffle=shuffle,
                       pin_memory=True,pin_memory_device="cuda",
                       num_workers=16, collate_fn=collate_fn)
+
+def plot_gt_data(lidar_pts, gt_boxes):
+    plt.figure(figsize=(10,10))
+    plot_lidar(lidar_pts,show=False)
+    plot_box_2d(gt_boxes,linespec="g-")
