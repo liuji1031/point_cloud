@@ -7,6 +7,7 @@ from voxel_feature import VoxelFeatureExtraction
 from spatial_conv import SpatialConvolution
 from rpn import RegionProposalNet
 from loss import VoxelNetLoss
+from loguru import logger
 
 class VoxelNet(nn.Module):
     """define the full voxelnet architecture
@@ -17,6 +18,9 @@ class VoxelNet(nn.Module):
     def __init__(self,
                  canvas_spatial_shape_DHW,
                  anchors,
+                 pos_cls_weight=2.0,
+                 neg_cls_weight=1.0,
+                 l1_weight=1.0,
                  device="cuda"
                  ):
         super().__init__()
@@ -38,8 +42,10 @@ class VoxelNet(nn.Module):
         self.rpn = RegionProposalNet(nanchor=len(anchors))
 
         # loss function
-        self.loss = torch.compile(VoxelNetLoss(pos_cls_weight=2.0,
-                                               neg_cls_weight=1.0))
+        logger.info(f"pos_cls_weight: {pos_cls_weight}, neg_cls_weight: {neg_cls_weight}, l1 weight: {l1_weight}")
+        self.loss = torch.compile(VoxelNetLoss(pos_cls_weight=pos_cls_weight,
+                                               neg_cls_weight=neg_cls_weight,
+                                               l1_weight=l1_weight))
         
         self.device = device
     
@@ -185,28 +191,37 @@ def nonmax_suppression(bbox_2corners, threshold=0.5):
 from dataset_util import get_2d_upper_lower_corners, get_2d_corners
 from iou import iou_box_array
 
-def iou_measure(cls_head, reg_head, gt_boxes, anchors, anchor_center_xy):
+def pred_bbox(cls_head, reg_head, anchors, anchor_center_xy,
+              prob_threshold=0.95):
+    bbox_4corners = gen_bbox(cls_head, reg_head, anchors,
+                            anchor_center_xy, prob_threshold=prob_threshold)
+    if bbox_4corners is None:
+        return None, None
+
+    bbox_2corners = get_2d_upper_lower_corners(bbox_4corners)
+    ind = nonmax_suppression(bbox_2corners, 0.1)
+
+    return bbox_4corners[ind], bbox_2corners[ind]
+
+def iou_measure(cls_head, reg_head, gt_boxes, anchors, anchor_center_xy,
+                prob_threshold=0.95):
 
     if gt_boxes.shape[0]==0:
         return 0.0
 
-    bbox_4corners = gen_bbox(cls_head, reg_head, anchors,
-                            anchor_center_xy, prob_threshold=0.95)
+    bbox_4corners, bbox_2corners = pred_bbox(cls_head, reg_head, anchors,
+                                            anchor_center_xy,
+                                            prob_threshold=prob_threshold)
     
     if bbox_4corners is None:
         return 0.0
 
-    bbox_2corners = get_2d_upper_lower_corners(bbox_4corners)
-    # bbox_2corners = bbox_2corners.astype(np.float32)
-    ind = nonmax_suppression(bbox_2corners, 0.1)
-
     gt_boxes_ = get_2d_corners(gt_boxes[:,[0]],gt_boxes[:,[1]],gt_boxes[:,[3]],
                                gt_boxes[:,[4]],gt_boxes[:,[6]])
     gt_boxes_ = get_2d_upper_lower_corners(gt_boxes_)
-    # gt_boxes_ = gt_boxes_.astype(np.float32)
 
     # compute iou between gt boxes and predicted boxes
-    iou_array = iou_box_array(bbox_2corners[ind], gt_boxes_)
+    iou_array = iou_box_array(bbox_2corners, gt_boxes_)
 
     # max over the predicted boxes
     iou_max = np.max(iou_array, axis=0)
