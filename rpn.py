@@ -72,8 +72,8 @@ class RegionProposalNet(jit.ScriptModule):
                                                add_relu=False)
         self.head1 = nn.Sequential(*head1_layers)
 
-        head2_layers = conv_block(768, 768, 3, 1, 1,repeat=1) + \
-                        conv_block(768, 128, 1, 1, 0,repeat=2) + \
+        head2_layers = conv_block(768, 128, 3, 1, 1,repeat=1) + \
+                        conv_block(128, 128, 1, 1, 0,repeat=2) + \
                         conv_block(128, 7*nanchor, 1, 1, 0,repeat=1,
                                                add_bn=False,
                                                add_relu=False)
