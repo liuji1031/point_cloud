@@ -65,13 +65,19 @@ class RegionProposalNet(jit.ScriptModule):
         self.deconv2 = nn.Sequential(*deconv_block(128, 256, 2, 2, 0,repeat=1))
         self.deconv3 = nn.Sequential(*deconv_block(256, 256, 4, 4, 0,repeat=1))
 
-        self.head1 = nn.Sequential(*conv_block(768, nanchor, 1, 1, 0,repeat=1,
+        head1_layers =  conv_block(768, 128, 3, 1, 1,repeat=1) + \
+                        conv_block(128, 128, 1, 1, 0,repeat=2) + \
+                        conv_block(128, nanchor, 1, 1, 0,repeat=1,
                                                add_bn=False,
-                                               add_relu=False))
-        self.head2 = nn.Sequential(*conv_block(768, 7*nanchor, 1, 1, 0,
-                                               repeat=1,
+                                               add_relu=False)
+        self.head1 = nn.Sequential(*head1_layers)
+
+        head2_layers = conv_block(768, 768, 3, 1, 1,repeat=1) + \
+                        conv_block(768, 128, 1, 1, 0,repeat=2) + \
+                        conv_block(128, 7*nanchor, 1, 1, 0,repeat=1,
                                                add_bn=False,
-                                               add_relu=False))
+                                               add_relu=False)
+        self.head2 = nn.Sequential(*head2_layers)
 
     @jit.script_method
     def forward(self, x):
